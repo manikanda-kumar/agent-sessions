@@ -194,6 +194,19 @@ open "/Applications/Agent Sessions.app"
 Prerequisites:
 - Xcode (macOS 14+)
 
+### Terminal CLI (repo)
+
+List sessions for the current git repo the same way the app does: scan each agent's on-disk store, merge with `index.db` when present (Codex/Claude in `session_meta`). No app required for disk-backed agents; index speeds Codex/Claude.
+
+```bash
+ln -sf "$(pwd)/tools/agent-sessions" ~/.local/bin/agent-sessions
+cd /path/to/your-repo
+agent-sessions list
+agent-sessions list opencode --resume
+```
+
+See `agents.md` (Terminal CLI section) for `sources`, `agents`, and flags.
+
 Build:
 ```bash
 xcodebuild -project AgentSessions.xcodeproj -scheme AgentSessions -configuration Debug -destination 'platform=macOS' build

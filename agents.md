@@ -65,6 +65,28 @@ Suggested build steps
   - `xcodebuild -project AgentSessions.xcodeproj -scheme AgentSessions -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath "$PWD/.deriveddata-tests" -parallel-testing-enabled NO clean test`
 - Rationale: isolates test artifacts/signing state from shared `DerivedData`, which avoids intermittent `AgentSessionsTests.xctest` nested-signature failures.
 
+## Terminal CLI (`tools/agent-sessions`)
+
+Repo-local helper to list sessions for the **current git repository**, matching the macOS app: per-agent disk scans (all supported sources) merged with `~/Library/Application Support/AgentSessions/index.db` (`session_meta`, mainly Codex/Claude today).
+
+Install once:
+
+```bash
+ln -sf "$(git rev-parse --show-toplevel)/tools/agent-sessions" ~/.local/bin/agent-sessions
+```
+
+Usage (from any repo directory):
+
+```bash
+agent-sessions sources          # global index counts; DATA vs CLI columns
+agent-sessions agents           # per-agent counts for this project
+agent-sessions list             # all agents
+agent-sessions list opencode    # filter by agent
+agent-sessions list --resume      # include resume command hints
+```
+
+Tests: `python3 tools/test_agent_sessions_cli.py`
+
 ## Conventional Commits and Trailers
 - Use Conventional Commits for every commit (feat, fix, docs, chore, etc.).
 - Include trailers in the commit body:
