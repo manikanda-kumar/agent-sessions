@@ -14,6 +14,7 @@ struct OnboardingSheetView: View {
     let openclawIndexer: OpenClawSessionIndexer
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
+    let grokIndexer: GrokSessionIndexer
     @ObservedObject var codexUsageModel: CodexUsageModel
     @ObservedObject var claudeUsageModel: ClaudeUsageModel
 
@@ -30,6 +31,7 @@ struct OnboardingSheetView: View {
     @AppStorage(PreferencesKey.Agents.openClawEnabled) private var openClawAgentEnabled: Bool = false
     @AppStorage(PreferencesKey.Agents.cursorEnabled) private var cursorAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
+    @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
 
     @AppStorage(PreferencesKey.codexUsageEnabled) private var codexUsageEnabled: Bool = false
     @AppStorage(PreferencesKey.claudeUsageEnabled) private var claudeUsageEnabled: Bool = false
@@ -138,6 +140,7 @@ struct OnboardingSheetView: View {
         .onReceive(openclawIndexer.$allSessions) { _ in handleSessionDataUpdate() }
         .onReceive(cursorIndexer.$allSessions) { _ in handleSessionDataUpdate() }
         .onReceive(piIndexer.$allSessions) { _ in handleSessionDataUpdate() }
+        .onReceive(grokIndexer.$allSessions) { _ in handleSessionDataUpdate() }
         .onChange(of: hideZeroMessageSessionsPref) { _, _ in handleSessionDataUpdate() }
         .onChange(of: hideLowMessageSessionsPref) { _, _ in handleSessionDataUpdate() }
         .onChange(of: showHousekeepingSessionsPref) { _, _ in handleSessionDataUpdate() }
@@ -677,6 +680,11 @@ struct OnboardingSheetView: View {
                 get: { piAgentEnabled },
                 set: { _ = AgentEnablement.setEnabled(.pi, enabled: $0) }
             )
+        case .grok:
+            return Binding(
+                get: { grokAgentEnabled },
+                set: { _ = AgentEnablement.setEnabled(.grok, enabled: $0) }
+            )
         }
     }
 
@@ -754,6 +762,7 @@ struct OnboardingSheetView: View {
         case .openclaw: return openclawIndexer.allSessions
         case .cursor: return cursorIndexer.allSessions
         case .pi: return piIndexer.allSessions
+        case .grok: return grokIndexer.allSessions
         }
     }
 
@@ -769,6 +778,7 @@ struct OnboardingSheetView: View {
         case .openclaw: return openClawAgentEnabled
         case .cursor: return cursorAgentEnabled
         case .pi: return piAgentEnabled
+        case .grok: return grokAgentEnabled
         }
     }
 
@@ -819,6 +829,7 @@ struct OnboardingSheetView: View {
             + openclawIndexer.allSessions
             + cursorIndexer.allSessions
             + piIndexer.allSessions
+            + grokIndexer.allSessions
         return WeeklyActivityDay.build(from: sessions, palette: palette)
     }
 
@@ -850,7 +861,7 @@ struct OnboardingSheetView: View {
         // Tool-call-only filter (strict)
         if hasCommandsOnlyPref {
             switch session.source {
-            case .codex, .opencode, .hermes, .copilot, .droid, .openclaw, .cursor, .pi:
+            case .codex, .opencode, .hermes, .copilot, .droid, .openclaw, .cursor, .pi, .grok:
                 if !session.events.isEmpty {
                     if !session.events.contains(where: { $0.kind == .tool_call }) { return false }
                 } else {
@@ -1113,6 +1124,7 @@ private struct AgentBadge: View {
         case .openclaw: return "CL"
         case .cursor: return "CR"
         case .pi: return "PI"
+        case .grok: return "GK"
         }
     }
 }
@@ -2176,6 +2188,8 @@ private struct OnboardingPalette {
             return Color(red: 0.20, green: 0.60, blue: 0.70)
         case .pi:
             return Color.agentPi
+        case .grok:
+            return Color.agentGrok
         }
     }
 }

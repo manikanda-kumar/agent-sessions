@@ -331,6 +331,89 @@ def _pi_read_header(path: Path) -> Optional[dict]:
     return None
 
 
+def grok_sessions_root() -> Path:
+    """Resolve Grok sessions root, honoring GROK_HOME like GrokSessionDiscovery."""
+    raw = os.environ.get("GROK_HOME", "").strip()
+    if raw:
+        expanded = Path(raw).expanduser()
+        candidates = [expanded / "sessions", expanded]
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate
+        return expanded / "sessions"
+    return Path.home() / ".grok" / "sessions"
+
+
+def _decode_grok_project_dir(name: str) -> Optional[str]:
+    try:
+        from urllib.parse import unquote
+
+        decoded = unquote(name).strip()
+        return decoded or None
+    except Exception:
+        return None
+
+
+def _grok_read_summary(session_dir: Path) -> Optional[dict]:
+    summary_path = session_dir / "summary.json"
+    if not summary_path.is_file():
+        return None
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def fetch_grok_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[RowDict]:
+    sessions_root = grok_sessions_root()
+    if not sessions_root.is_dir():
+        return []
+    rows: list[RowDict] = []
+    for project_dir in sessions_root.iterdir():
+        if not project_dir.is_dir() or "%" not in project_dir.name:
+            continue
+        cwd = _decode_grok_project_dir(project_dir.name)
+        if not path_matches_project(cwd, root, repo_label):
+            continue
+        for session_dir in project_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            chat_history = session_dir / "chat_history.jsonl"
+            if not chat_history.is_file():
+                continue
+            summary = _grok_read_summary(session_dir) or {}
+            info = summary.get("info") if isinstance(summary.get("info"), dict) else {}
+            sid = info.get("id") or session_dir.name
+            cwd = info.get("cwd") or cwd
+            title = (
+                summary.get("generated_title")
+                or summary.get("session_summary")
+                or f"Grok session {str(sid)[:12]}"
+            )
+            sort_ts = _mtime_ts(chat_history)
+            updated = summary.get("updated_at") or summary.get("last_active_at")
+            if isinstance(updated, str):
+                try:
+                    sort_ts = int(datetime.fromisoformat(updated.replace("Z", "+00:00")).timestamp())
+                except ValueError:
+                    pass
+            rows.append(
+                _make_row(
+                    source="grok",
+                    session_id=str(sid),
+                    title=str(title).strip() or "(no title)",
+                    sort_ts=sort_ts,
+                    cwd=cwd,
+                    repo_label=repo_label,
+                    model=summary.get("current_model_id"),
+                    messages=int(summary.get("num_chat_messages") or summary.get("num_messages") or 0),
+                )
+            )
+    rows.sort(key=lambda r: r["sort_ts"], reverse=True)
+    return rows[: int(limit)] if limit else rows
+
+
 def fetch_pi_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[RowDict]:
     sessions_root = Path.home() / ".pi" / "agent" / "sessions"
     if not sessions_root.is_dir():
@@ -689,4 +772,5 @@ DISK_FETCHERS: dict[str, Callable[[Path, str, Optional[int]], list[RowDict]]] = 
     "openclaw": fetch_openclaw_disk,
     "cursor": fetch_cursor_disk,
     "pi": fetch_pi_disk,
+    "grok": fetch_grok_disk,
 }

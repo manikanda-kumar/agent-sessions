@@ -12,6 +12,7 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
     case openclaw = "openclaw"
     case cursor = "cursor"
     case pi = "pi"
+    case grok = "grok"
 
     public var displayName: String {
         switch self {
@@ -25,6 +26,7 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .openclaw: return "OpenClaw"
         case .cursor: return "Cursor"
         case .pi: return "Pi"
+        case .grok: return "Grok Build"
         }
     }
 
@@ -40,6 +42,7 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .openclaw: return "pawprint"
         case .cursor: return "cursorarrow.rays"
         case .pi: return "p.circle"
+        case .grok: return "x.circle"
         }
     }
 
@@ -54,6 +57,7 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .openclaw:         return "3.1"
         case .cursor:           return "3.2"
         case .pi:               return "3.8"
+        case .grok:             return "3.9.2"
         }
     }
 
@@ -69,6 +73,7 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .openclaw: return "Explore your OpenClaw conversations"
         case .cursor:   return "Import and search your Cursor AI sessions"
         case .pi:       return "Browse your Pi coding agent sessions"
+        case .grok:     return "Browse your Grok Build coding agent sessions"
         }
     }
 }

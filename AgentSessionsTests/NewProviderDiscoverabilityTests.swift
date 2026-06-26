@@ -31,6 +31,10 @@ final class NewProviderDiscoverabilityTests: XCTestCase {
         XCTAssertEqual(SessionSource.cursor.versionIntroduced, "3.2")
     }
 
+    func testGrokVersionIntroduced() {
+        XCTAssertEqual(SessionSource.grok.versionIntroduced, "3.9.2")
+    }
+
     func testOriginalProvidersHaveEarlyVersions() {
         XCTAssertEqual(SessionSource.codex.versionIntroduced, "1.0")
         XCTAssertEqual(SessionSource.claude.versionIntroduced, "1.0")

@@ -455,6 +455,14 @@ final class SessionArchiveManager: ObservableObject, @unchecked Sendable {
                     map[s.id] = url
                 }
             }
+        case .grok:
+            let custom = defaults.string(forKey: PreferencesKey.Paths.grokSessionsRootOverride)
+            let discovery = GrokSessionDiscovery(customRoot: custom?.isEmpty == false ? custom : nil)
+            for url in discovery.discoverSessionFiles() {
+                if let s = GrokSessionParser.parseFile(at: url), !s.id.isEmpty {
+                    map[s.id] = url
+                }
+            }
         }
 
         return map
@@ -484,6 +492,8 @@ final class SessionArchiveManager: ObservableObject, @unchecked Sendable {
             return CursorSessionParser.parseFile(at: upstreamURL) ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
         case .pi:
             return PiSessionParser.parseFile(at: upstreamURL) ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
+        case .grok:
+            return GrokSessionParser.parseFile(at: upstreamURL) ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
         }
     }
 

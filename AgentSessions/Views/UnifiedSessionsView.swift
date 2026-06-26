@@ -272,6 +272,7 @@ struct UnifiedSessionsView: View {
     let openclawIndexer: OpenClawSessionIndexer
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
+    let grokIndexer: GrokSessionIndexer
     @EnvironmentObject var codexUsageModel: CodexUsageModel
     @EnvironmentObject var claudeUsageModel: ClaudeUsageModel
     @EnvironmentObject var activeCodexSessions: CodexActiveSessionsModel
@@ -302,6 +303,8 @@ struct UnifiedSessionsView: View {
     @AppStorage(PreferencesKey.Unified.showSubagentHierarchy) private var showSubagentHierarchy: Bool = true
     @AppStorage(PreferencesKey.Unified.showTranscriptWindow) private var showTranscriptWindow: Bool = true
     @AppStorage(PreferencesKey.Cockpit.codexActiveSessionsEnabled) private var liveSessionsFeatureEnabled: Bool = true
+    @ObservedObject private var remoteMonitor = RemoteMonitorModel.shared
+    @State private var remoteVisibilityConsumerID = UUID()
 	@AppStorage("StripMonochromeMeters") private var stripMonochrome: Bool = false
 	@AppStorage("ModifiedDisplay") private var modifiedDisplayRaw: String = SessionIndexer.ModifiedDisplay.relative.rawValue
 	@AppStorage("AppAppearance") private var appAppearanceRaw: String = AppAppearance.system.rawValue
@@ -317,6 +320,7 @@ struct UnifiedSessionsView: View {
 	    @AppStorage(PreferencesKey.Agents.openClawEnabled) private var openClawAgentEnabled: Bool = false
 	    @AppStorage(PreferencesKey.Agents.cursorEnabled) private var cursorAgentEnabled: Bool = true
 	    @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
+	    @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
 	    @State private var autoSelectEnabled: Bool = true
 	    @State private var isDatasetChurning: Bool = false
 	    @State private var isAutoSelectingFromSearch: Bool = false
@@ -366,6 +370,7 @@ struct UnifiedSessionsView: View {
          openclawIndexer: OpenClawSessionIndexer,
          cursorIndexer: CursorSessionIndexer,
          piIndexer: PiSessionIndexer,
+         grokIndexer: GrokSessionIndexer,
          analyticsReady: Bool,
          analyticsPhase: AnalyticsIndexPhase,
          analyticsIsStale: Bool,
@@ -382,6 +387,7 @@ struct UnifiedSessionsView: View {
         self.openclawIndexer = openclawIndexer
         self.cursorIndexer = cursorIndexer
         self.piIndexer = piIndexer
+        self.grokIndexer = grokIndexer
         self.analyticsReady = analyticsReady
         self.analyticsPhase = analyticsPhase
         self.analyticsIsStale = analyticsIsStale
@@ -448,6 +454,11 @@ struct UnifiedSessionsView: View {
                 transcriptCache: piIndexer.searchTranscriptCache,
                 update: { piIndexer.updateSession($0) },
                 parseFull: { url, _ in PiSessionParser.parseFileFull(at: url, allowLargeFile: true) }
+            ),
+            .grok: .init(
+                transcriptCache: grokIndexer.searchTranscriptCache,
+                update: { grokIndexer.updateSession($0) },
+                parseFull: { url, _ in GrokSessionParser.parseFileFull(at: url) }
             ),
         ])
         _searchCoordinator = StateObject(wrappedValue: SearchCoordinator(store: store))
@@ -546,7 +557,10 @@ struct UnifiedSessionsView: View {
         let afterPi = afterCursor
             .onChange(of: unified.includePi) { _, _ in restartSearchIfRunning() }
 
-        let afterActiveOnly = afterPi
+        let afterGrok = afterPi
+            .onChange(of: unified.includeGrok) { _, _ in restartSearchIfRunning() }
+
+        let afterActiveOnly = afterGrok
             .onChange(of: showActiveSessionsOnly) { _, _ in
                 if !liveSessionsFeatureEnabled {
                     showActiveSessionsOnly = false
@@ -1060,6 +1074,15 @@ struct UnifiedSessionsView: View {
             }
             refreshSelectionSourceFromCachedRows()
 	        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            RemoteSessionsSection(model: remoteMonitor)
+        }
+        .onAppear {
+            remoteMonitor.setVisible(true, consumerID: remoteVisibilityConsumerID)
+        }
+        .onDisappear {
+            remoteMonitor.setVisible(false, consumerID: remoteVisibilityConsumerID)
+        }
 	    }
 
 	    private var footerIsBusy: Bool {
@@ -1186,6 +1209,8 @@ struct UnifiedSessionsView: View {
             return true // session.id from transcript UUID; falls back to --continue
         case .pi:
             return true // session file path or id; falls back to --continue
+        case .grok:
+            return true // session directory UUID; uses grok -r
         case .gemini:
             return (geminiCLISessionID ?? GeminiSessionIDHelper.deriveSessionID(from: session)) != nil
         default:
@@ -1287,6 +1312,21 @@ struct UnifiedSessionsView: View {
             let command = wd.map { "cd \(builder.shellQuoteIfNeeded($0.path)) && \(core)" } ?? core
             pb.setString(command, forType: .string)
 
+        case .grok:
+            let settings = GrokSettings.shared
+            let sid = session.id
+            let wd = settings.effectiveWorkingDirectory(for: session)
+            let binary = settings.binaryPath.isEmpty ? nil : settings.binaryPath
+            let grokHome = GrokSessionParser.grokHome(forSessionFileAt: URL(fileURLWithPath: session.filePath))
+            let command = AgentResumeHintBuilder.makeHint(
+                source: .grok,
+                sessionID: sid,
+                cwd: wd?.path,
+                binary: binary,
+                grokHome: grokHome
+            )
+            pb.setString(command, forType: .string)
+
         case .gemini:
             let settings = GeminiCLISettings.shared
             guard let sid = geminiCLISessionID ?? GeminiSessionIDHelper.deriveSessionID(from: session) else { return }
@@ -1316,7 +1356,8 @@ struct UnifiedSessionsView: View {
                                droidIndexer: droidIndexer,
                                openclawIndexer: openclawIndexer,
                                cursorIndexer: cursorIndexer,
-                               piIndexer: piIndexer)
+                               piIndexer: piIndexer,
+                               grokIndexer: grokIndexer)
                 .environmentObject(focusCoordinator)
                 .environmentObject(searchState)
                 .id("transcript-host")
@@ -1338,6 +1379,7 @@ struct UnifiedSessionsView: View {
                         case .openclaw: return "OpenClaw"
                         case .cursor: return "Cursor"
                         case .pi: return "Pi"
+                        case .grok: return "Grok Build"
                         }
                     }()
                     let accent: Color = sourceAccent(s)
@@ -1400,6 +1442,15 @@ struct UnifiedSessionsView: View {
                             ? "Show only live sessions in the list (Codex, Claude)"
                             : "Enable Live sessions + Cockpit (Beta) in Settings → Agent Cockpit."
                     )
+
+                Toggle(isOn: $remoteMonitor.isEnabled) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(remoteMonitor.isEnabled ? Color.accentColor : .secondary)
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+                .help("Monitor remote machines (read-only)")
 
                 Button(action: { showSubagentHierarchy.toggle() }) {
                     Image(systemName: showSubagentHierarchy ? "list.bullet.indent" : "list.bullet")
@@ -1475,6 +1526,11 @@ struct UnifiedSessionsView: View {
                     AgentTabToggle(title: "Pi", color: Color.agentPi, isMonochrome: stripMonochrome, isOn: $unified.includePi)
                         .help("Show or hide Pi sessions in the list (⌘9)")
                         .keyboardShortcut("9", modifiers: .command)
+                }
+
+                if grokAgentEnabled {
+                    AgentTabToggle(title: "Grok", color: Color.agentGrok, isMonochrome: stripMonochrome, isOn: $unified.includeGrok)
+                        .help("Show or hide Grok Build sessions in the list")
                 }
             }
             .controlSize(.small)
@@ -1840,6 +1896,9 @@ struct UnifiedSessionsView: View {
         } else if s.source == .pi, let exist = piIndexer.allSessions.first(where: { $0.id == id }), exist.events.isEmpty {
             piIndexer.reloadSession(id: id)
             requestedSelectionReload = true
+        } else if s.source == .grok, let exist = grokIndexer.allSessions.first(where: { $0.id == id }), exist.events.isEmpty {
+            grokIndexer.reloadSession(id: id)
+            requestedSelectionReload = true
         }
 
         searchCoordinator.prewarmTranscriptIfNeeded(for: s, allowParsingLightweight: !requestedSelectionReload)
@@ -2008,6 +2067,8 @@ struct UnifiedSessionsView: View {
             if !unified.includeCursor { unified.includeCursor = true }
         case .pi:
             if !unified.includePi { unified.includePi = true }
+        case .grok:
+            if !unified.includeGrok { unified.includeGrok = true }
         }
     }
 
@@ -2239,6 +2300,7 @@ struct UnifiedSessionsView: View {
         case .openclaw: label = "OpenClaw"
         case .cursor: label = "Cursor"
         case .pi: label = "Pi"
+        case .grok: label = "Grok"
         }
         let isSubagentRow = (hierarchyRowMeta[session.id]?.depth ?? 0) > 0
         return HStack(spacing: 6) {
@@ -2474,6 +2536,8 @@ struct UnifiedSessionsView: View {
             return CursorSettings.shared.effectiveWorkingDirectory(for: session)
         case .pi:
             return PiSettings.shared.effectiveWorkingDirectory(for: session)
+        case .grok:
+            return GrokSettings.shared.effectiveWorkingDirectory(for: session)
         case .gemini:
             return GeminiCLISettings.shared.effectiveWorkingDirectory(for: session)
         default:
@@ -2510,6 +2574,7 @@ struct UnifiedSessionsView: View {
         case .copilot: return "Copilot CLI"
         case .cursor: return "Cursor CLI"
         case .pi: return "Pi CLI"
+        case .grok: return "Grok Build"
         case .gemini: return "Gemini CLI"
         default: return "CLI"
         }
@@ -2519,7 +2584,7 @@ struct UnifiedSessionsView: View {
         switch s.source {
         case .codex:
             return canResumeCodexInCLI(s)
-        case .claude, .opencode, .hermes, .copilot, .cursor, .pi:
+        case .claude, .opencode, .hermes, .copilot, .cursor, .pi, .grok:
             return true
         case .gemini:
             return (geminiCLISessionID ?? GeminiSessionIDHelper.deriveSessionID(from: s)) != nil
@@ -2629,6 +2694,31 @@ struct UnifiedSessionsView: View {
                 let coord = PiResumeCoordinator(env: PiCLIEnvironment(), builder: PiResumeCommandBuilder(), launcher: launcher)
                 _ = await coord.resumeInTerminal(input: input, policy: settings.fallbackPolicy, dryRun: false)
             }
+        case .grok:
+            let settings = GrokSettings.shared
+            let sid = s.id
+            let wd = settings.effectiveWorkingDirectory(for: s)
+            let binary = settings.binaryPath.isEmpty ? nil : settings.binaryPath
+            let grokHome = GrokSessionParser.grokHome(forSessionFileAt: URL(fileURLWithPath: s.filePath))
+            let command = AgentResumeHintBuilder.makeHint(
+                source: .grok,
+                sessionID: sid,
+                cwd: wd?.path,
+                binary: binary,
+                grokHome: grokHome
+            )
+            Task { @MainActor in
+                do {
+                    switch ResumePreferenceHelpers.resolveTerminalKind() {
+                    case .iterm2:
+                        try AgentTerminalLauncher.launchInITerm(shellCommand: command, domain: "GrokTerminalLauncher")
+                    case .warp, .warpPreview, .terminalApp, .unknown:
+                        try AgentTerminalLauncher.launchInTerminal(shellCommand: command, domain: "GrokTerminalLauncher")
+                    }
+                } catch {
+                    NSSound.beep()
+                }
+            }
         case .gemini:
             let settings = GeminiCLISettings.shared
             let sid = GeminiSessionIDHelper.deriveSessionID(from: s)
@@ -2731,12 +2821,13 @@ struct UnifiedSessionsView: View {
                                 includeOpenClaw: unified.includeOpenClaw && openClawAgentEnabled,
                                 includeCursor: unified.includeCursor && cursorAgentEnabled,
                                 includePi: unified.includePi && piAgentEnabled,
+                                includeGrok: unified.includeGrok && grokAgentEnabled,
                                 enableDeepScan: searchCoordinator.deepScanEnabled,
                                 all: unified.allSessions)
     }
 
     private func flashAgentEnablementNoticeIfNeeded() {
-        let anyDisabled = !(codexAgentEnabled && claudeAgentEnabled && geminiAgentEnabled && openCodeAgentEnabled && hermesAgentEnabled && copilotAgentEnabled && droidAgentEnabled && openClawAgentEnabled && cursorAgentEnabled && piAgentEnabled)
+        let anyDisabled = !(codexAgentEnabled && claudeAgentEnabled && geminiAgentEnabled && openCodeAgentEnabled && hermesAgentEnabled && copilotAgentEnabled && droidAgentEnabled && openClawAgentEnabled && cursorAgentEnabled && piAgentEnabled && grokAgentEnabled)
         guard anyDisabled else {
             withAnimation { showAgentEnablementNotice = false }
             return
@@ -2760,6 +2851,7 @@ struct UnifiedSessionsView: View {
         case .openclaw: return Color.agentOpenClaw
         case .cursor: return Color.agentCursor
         case .pi: return Color.agentPi
+        case .grok: return Color.agentGrok
         }
     }
 
@@ -3240,6 +3332,7 @@ private struct TranscriptHostView: View {
     let openclawIndexer: OpenClawSessionIndexer
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
+    let grokIndexer: GrokSessionIndexer
 
     var body: some View {
         ZStack { // keep one stable container to avoid split reset
@@ -3270,6 +3363,14 @@ private struct TranscriptHostView: View {
                 enableCaching: false
             )
             .opacity(kind == .pi ? 1 : 0)
+            UnifiedTranscriptView(
+                indexer: grokIndexer,
+                sessionID: selection,
+                sessionIDExtractor: { $0.id.isEmpty ? nil : $0.id },
+                sessionIDLabel: "Grok",
+                enableCaching: false
+            )
+            .opacity(kind == .grok ? 1 : 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
@@ -3414,6 +3515,7 @@ private struct UnifiedSearchFiltersView: View {
     @ObservedObject var focus: WindowFocusCoordinator
     @ObservedObject var searchState: UnifiedSearchState
     @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
+    @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
     @FocusState private var searchFocus: SearchFocusTarget?
     @State private var searchDebouncer: DispatchWorkItem? = nil
     @State private var focusRequestToken: Int = 0
@@ -3549,6 +3651,7 @@ private struct UnifiedSearchFiltersView: View {
                      includeOpenClaw: unified.includeOpenClaw,
                      includeCursor: unified.includeCursor,
                      includePi: unified.includePi && piAgentEnabled,
+                     includeGrok: unified.includeGrok && grokAgentEnabled,
                      enableDeepScan: deepScan,
                      all: unified.allSessions)
     }
@@ -3584,6 +3687,7 @@ private struct UnifiedSearchFiltersView: View {
                          includeOpenClaw: unified.includeOpenClaw,
                          includeCursor: unified.includeCursor,
                          includePi: unified.includePi && piAgentEnabled,
+                         includeGrok: unified.includeGrok && grokAgentEnabled,
                          enableDeepScan: false,
                          all: unified.allSessions)
         }

@@ -396,6 +396,8 @@ private extension AgentUpdateService {
             return nil
         case .pi:
             return nil
+        case .grok:
+            return nil
         }
     }
 

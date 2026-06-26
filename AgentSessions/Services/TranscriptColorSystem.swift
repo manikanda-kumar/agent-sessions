@@ -81,6 +81,9 @@ enum TranscriptColorSystem {
         case .pi:
             // Green-cyan accent, distinct from Gemini and Cursor.
             return NSColor(calibratedRed: 0.05, green: 0.62, blue: 0.48, alpha: 1.0)
+        case .grok:
+            // Neutral slate accent for Grok Build.
+            return NSColor(calibratedRed: 0.42, green: 0.44, blue: 0.50, alpha: 1.0)
         }
     }
 

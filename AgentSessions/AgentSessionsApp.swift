@@ -182,6 +182,7 @@ struct AgentSessionsApp: App {
     @StateObject private var openclawIndexer = OpenClawSessionIndexer()
     @StateObject private var cursorIndexer = CursorSessionIndexer()
     @StateObject private var piIndexer = PiSessionIndexer()
+    @StateObject private var grokIndexer = GrokSessionIndexer()
     @StateObject private var updaterController = UpdaterController()
     @StateObject private var onboardingCoordinator = OnboardingCoordinator()
     @StateObject private var unifiedIndexerHolder = _UnifiedHolder()
@@ -213,6 +214,7 @@ struct AgentSessionsApp: App {
     @AppStorage(PreferencesKey.Agents.openCodeEnabled) private var openCodeAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.hermesEnabled) private var hermesAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
+    @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
     @AppStorage(PreferencesKey.Advanced.hideDockIcon) private var hideDockIcon: Bool = false
     @AppStorage("UnifiedLegacyNoticeShown") private var unifiedNoticeShown: Bool = false
     @State private var selectedSessionID: String?
@@ -262,7 +264,8 @@ struct AgentSessionsApp: App {
                 droidIndexer: droidIndexer,
                 openclawIndexer: openclawIndexer,
                 cursorIndexer: cursorIndexer,
-                piIndexer: piIndexer
+                piIndexer: piIndexer,
+                grokIndexer: grokIndexer
             )
             configuredUnifiedWindow(unified: unified)
         }
@@ -283,6 +286,7 @@ struct AgentSessionsApp: App {
             openclawIndexer: openclawIndexer,
             cursorIndexer: cursorIndexer,
             piIndexer: piIndexer,
+            grokIndexer: grokIndexer,
             analyticsReady: analyticsReady,
             analyticsPhase: analyticsPhase,
             analyticsIsStale: analyticsStale,
@@ -333,6 +337,7 @@ struct AgentSessionsApp: App {
         .onChange(of: geminiAgentEnabled) { _, _ in handleAgentEnablementChange() }
         .onChange(of: openCodeAgentEnabled) { _, _ in handleAgentEnablementChange() }
         .onChange(of: piAgentEnabled) { _, _ in handleAgentEnablementChange() }
+        .onChange(of: grokAgentEnabled) { _, _ in handleAgentEnablementChange() }
         .onAppear {
             guard !AppRuntime.isRunningTests else { return }
             applyActivationPolicyAndCleanupIfNeeded(hideDockIcon: hideDockIcon, menuBarEnabled: menuBarEnabled)
@@ -361,6 +366,7 @@ struct AgentSessionsApp: App {
                     openclawIndexer: openclawIndexer,
                     cursorIndexer: cursorIndexer,
                     piIndexer: piIndexer,
+                    grokIndexer: grokIndexer,
                     codexUsageModel: codexUsageModel,
                     claudeUsageModel: claudeUsageModel
                 )
@@ -452,7 +458,8 @@ struct AgentSessionsApp: App {
                         droidIndexer: droidIndexer,
                         openclawIndexer: openclawIndexer,
                         cursorIndexer: cursorIndexer,
-                        piIndexer: piIndexer
+                        piIndexer: piIndexer,
+                        grokIndexer: grokIndexer
                     )
                 )
                 .environmentObject(archiveManager)
@@ -513,7 +520,8 @@ final class _UnifiedHolder: ObservableObject {
                      droidIndexer: DroidSessionIndexer,
                      openclawIndexer: OpenClawSessionIndexer,
                      cursorIndexer: CursorSessionIndexer,
-                     piIndexer: PiSessionIndexer) -> UnifiedSessionIndexer {
+                     piIndexer: PiSessionIndexer,
+                     grokIndexer: GrokSessionIndexer) -> UnifiedSessionIndexer {
         if let u = unified { return u }
         let u = UnifiedSessionIndexer(codexIndexer: codexIndexer,
                                       claudeIndexer: claudeIndexer,
@@ -524,7 +532,8 @@ final class _UnifiedHolder: ObservableObject {
                                       droidIndexer: droidIndexer,
                                       openclawIndexer: openclawIndexer,
                                       cursorIndexer: cursorIndexer,
-                                      piIndexer: piIndexer)
+                                      piIndexer: piIndexer,
+                                      grokIndexer: grokIndexer)
         unified = u
         return u
     }
@@ -631,7 +640,8 @@ extension AgentSessionsApp {
             droidIndexer: droidIndexer,
             openclawIndexer: openclawIndexer,
             cursorIndexer: cursorIndexer,
-            piIndexer: piIndexer
+            piIndexer: piIndexer,
+            grokIndexer: grokIndexer
         )
     }
 
@@ -1139,6 +1149,7 @@ final class OnboardingWindowPresenter: NSObject, NSWindowDelegate {
         openclawIndexer: OpenClawSessionIndexer,
         cursorIndexer: CursorSessionIndexer,
         piIndexer: PiSessionIndexer,
+        grokIndexer: GrokSessionIndexer,
         codexUsageModel: CodexUsageModel,
         claudeUsageModel: ClaudeUsageModel
     ) {
@@ -1156,6 +1167,7 @@ final class OnboardingWindowPresenter: NSObject, NSWindowDelegate {
             openclawIndexer: openclawIndexer,
             cursorIndexer: cursorIndexer,
             piIndexer: piIndexer,
+            grokIndexer: grokIndexer,
             codexUsageModel: codexUsageModel,
             claudeUsageModel: claudeUsageModel
         )
@@ -1248,6 +1260,7 @@ private struct OnboardingWindowState {
     let openclawIndexer: OpenClawSessionIndexer
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
+    let grokIndexer: GrokSessionIndexer
     let codexUsageModel: CodexUsageModel
     let claudeUsageModel: ClaudeUsageModel
 }
@@ -1270,6 +1283,7 @@ private struct OnboardingWindowRoot: View {
             openclawIndexer: state.openclawIndexer,
             cursorIndexer: state.cursorIndexer,
             piIndexer: state.piIndexer,
+            grokIndexer: state.grokIndexer,
             codexUsageModel: state.codexUsageModel,
             claudeUsageModel: state.claudeUsageModel
         )

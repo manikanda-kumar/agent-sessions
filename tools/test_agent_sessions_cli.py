@@ -189,6 +189,25 @@ class AgentSessionsCLITests(unittest.TestCase):
         self.assertEqual(set(listable.keys()), set(cli.ALL_SOURCES))
         self.assertTrue(all(listable.values()))
 
+    def test_grok_sessions_root_honors_grok_home(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            grok_home = Path(tmp) / "custom-grok"
+            sessions = grok_home / "sessions"
+            sessions.mkdir(parents=True)
+            old = os.environ.get("GROK_HOME")
+            os.environ["GROK_HOME"] = str(grok_home)
+            try:
+                self.assertEqual(cli._DISK.grok_sessions_root(), sessions)
+                present = cli.agent_data_present()
+                self.assertTrue(present["grok"])
+            finally:
+                if old is None:
+                    os.environ.pop("GROK_HOME", None)
+                else:
+                    os.environ["GROK_HOME"] = old
+
 
 if __name__ == "__main__":
     unittest.main()

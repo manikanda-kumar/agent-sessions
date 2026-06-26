@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Features
+- Grok Build CLI: Tier-2 local support for Grok sessions under `~/.grok/sessions`, including discovery, browsing, search, Preferences controls, Grok accent colors, and Copy Resume via `grok -r`; Agent Cockpit/live status, analytics, and usage tracking remain unsupported.
+- Grok Build: Fixed project-scoped discovery when filtering by cwd and aligned `agent-sessions` CLI disk scans with `GROK_HOME`.
+- Remote monitoring (opt-in): Toolbar "globe" toggle enables read-only polling of configured remote machines. Shows live agent processes (agent, project/cwd, state, times) per docs/remote-monitoring-plan.md. SSH and labctl transports; pure parser; non-navigable rows.
 
 ## [3.9.1] - 2026-06-05
 ### Bug Fixes

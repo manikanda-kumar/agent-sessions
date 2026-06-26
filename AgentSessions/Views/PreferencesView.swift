@@ -18,6 +18,8 @@ struct PreferencesView: View {
     @ObservedObject var copilotSettings = CopilotSettings.shared
     @ObservedObject var cursorSettings = CursorSettings.shared
     @ObservedObject var piSettings = PiSettings.shared
+    @ObservedObject var grokSettings = GrokSettings.shared
+    @ObservedObject var remoteMonitor = RemoteMonitorModel.shared
     @State var showingResetConfirm: Bool = false
     @AppStorage(PreferencesKey.showUsageStrip) var showUsageStrip: Bool = false
     // Codex tracking master toggle
@@ -69,6 +71,7 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.droidCLIAvailable) var droidCLIAvailable: Bool = true
     @AppStorage(PreferencesKey.cursorCLIAvailable) var cursorCLIAvailable: Bool = true
     @AppStorage(PreferencesKey.piCLIAvailable) var piCLIAvailable: Bool = true
+    @AppStorage(PreferencesKey.grokCLIAvailable) var grokCLIAvailable: Bool = true
     // Global agent enablement
     @AppStorage(PreferencesKey.Agents.codexEnabled) var codexAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.claudeEnabled) var claudeAgentEnabled: Bool = true
@@ -80,6 +83,7 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.Agents.openClawEnabled) var openClawAgentEnabled: Bool = false
     @AppStorage(PreferencesKey.Agents.cursorEnabled) var cursorAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.piEnabled) var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
+    @AppStorage(PreferencesKey.Agents.grokEnabled) var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
     // Menu bar prefs
     @AppStorage(PreferencesKey.menuBarEnabled) var menuBarEnabled: Bool = false
     @AppStorage(PreferencesKey.menuBarScope) var menuBarScopeRaw: String = MenuBarScope.both.rawValue
@@ -205,6 +209,10 @@ struct PreferencesView: View {
     @State var piVersionString: String? = nil
     @State var piResolvedPath: String? = nil
     @State var piProbeDebounce: DispatchWorkItem? = nil
+    @State var grokProbeState: ProbeState = .idle
+    @State var grokVersionString: String? = nil
+    @State var grokResolvedPath: String? = nil
+    @State var grokProbeDebounce: DispatchWorkItem? = nil
     // Copilot sessions directory override
     @AppStorage(PreferencesKey.Paths.copilotSessionsRootOverride) var copilotSessionsPath: String = ""
     @State var copilotSessionsPathValid: Bool = true
@@ -238,6 +246,9 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.Paths.piSessionsRootOverride) var piSessionsPath: String = ""
     @State var piSessionsPathValid: Bool = true
     @State var piSessionsPathDebounce: DispatchWorkItem? = nil
+    @AppStorage(PreferencesKey.Paths.grokSessionsRootOverride) var grokSessionsPath: String = ""
+    @State var grokSessionsPathValid: Bool = true
+    @State var grokSessionsPathDebounce: DispatchWorkItem? = nil
     // Per-agent update flow state
     @State var agentUpdateCheckingSources: Set<SessionSource> = []
     @State var agentUpdatingSources: Set<SessionSource> = []
@@ -245,7 +256,7 @@ struct PreferencesView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
             List(selection: $selectedTab) {
-                ForEach(visibleTabs.filter { $0 != .about && $0 != .codexCLI && $0 != .claudeResume && $0 != .opencode && $0 != .geminiCLI && $0 != .hermesCLI && $0 != .copilotCLI && $0 != .droidCLI && $0 != .openClawCLI && $0 != .cursor && $0 != .pi }, id: \.self) { tab in
+                ForEach(visibleTabs.filter { $0 != .about && $0 != .codexCLI && $0 != .claudeResume && $0 != .opencode && $0 != .geminiCLI && $0 != .hermesCLI && $0 != .copilotCLI && $0 != .droidCLI && $0 != .openClawCLI && $0 != .cursor && $0 != .pi && $0 != .grok }, id: \.self) { tab in
                     Label(tab.title, systemImage: tab.iconName)
                         .tag(tab)
                 }
@@ -257,10 +268,12 @@ struct PreferencesView: View {
                     Label(tab.title, systemImage: tab.iconName)
                         .tag(tab)
                 }
-                ForEach([PreferencesTab.cursor, .pi, .hermesCLI, .openClawCLI], id: \.self) { tab in
+                ForEach([PreferencesTab.cursor, .pi, .grok, .hermesCLI, .openClawCLI], id: \.self) { tab in
                     Label(tab.title, systemImage: tab.iconName)
                         .tag(tab)
                 }
+                Label("Remote", systemImage: "globe")
+                    .tag(PreferencesTab.remote)
             }
             // Fix the sidebar width to avoid horizontal jumps when switching panes
             .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 200)
@@ -397,6 +410,10 @@ struct PreferencesView: View {
                 cursorTab
             case .pi:
                 piTab
+            case .grok:
+                grokTab
+            case .remote:
+                remoteTabImpl
             case .about:
                 aboutTab
             }
@@ -405,6 +422,20 @@ struct PreferencesView: View {
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .controlSize(.small)
+    }
+
+    var remoteTabImpl: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Remote Monitoring").font(.title2).fontWeight(.semibold)
+                Text("Opt-in read-only live agent monitoring on remote hosts (SSH or labctl playground). No terminal, resume, or transcript access. See docs/remote-monitoring-plan.md.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Monitor remote machines (read-only)", isOn: $remoteMonitor.isEnabled)
+                Divider()
+                remoteMachinesEditor
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var footer: some View {
@@ -712,6 +743,8 @@ struct PreferencesView: View {
         cursorSettings.setResolvedBinaryPath(nil)
         piSettings.setBinaryPath("")
         piSettings.setResolvedBinaryPath(nil)
+        grokSettings.setBinaryPath("")
+        grokSettings.setResolvedBinaryPath(nil)
         droidSettings.setBinaryPath("")
         openClawBinaryPath = ""
         validateOpenClawBinaryPath()
@@ -722,10 +755,12 @@ struct PreferencesView: View {
         droidProjectsPath = ""
         openClawSessionsPath = ""
         piSessionsPath = ""
+        grokSessionsPath = ""
         validateDroidSessionsPath()
         validateDroidProjectsPath()
         validateOpenClawSessionsPath()
         validatePiSessionsPath()
+        validateGrokSessionsPath()
 
         cockpitReduceTransparency = true
 
@@ -742,6 +777,7 @@ struct PreferencesView: View {
         scheduleDroidProbe()
         scheduleOpenClawProbe()
         schedulePiProbe()
+        scheduleGrokProbe()
     }
 
     func closeWindow() {
@@ -855,6 +891,7 @@ struct PreferencesView: View {
         case .openclaw: scheduleOpenClawProbe()
         case .cursor: scheduleCursorProbe()
         case .pi: schedulePiProbe()
+        case .grok: scheduleGrokProbe()
         }
     }
 
@@ -880,6 +917,8 @@ struct PreferencesView: View {
             return cursorResolvedPath
         case .pi:
             return piResolvedPath
+        case .grok:
+            return grokResolvedPath
         }
     }
 
@@ -914,6 +953,9 @@ struct PreferencesView: View {
             return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
         case .pi:
             let value = piSettings.binaryPath
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        case .grok:
+            let value = grokSettings.binaryPath
             return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
         }
     }
@@ -1048,6 +1090,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
     case openClawCLI
     case cursor
     case pi
+    case grok
+    case remote
     case about
 
     var id: String { rawValue }
@@ -1071,6 +1115,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         case .openClawCLI: return "OpenClaw"
         case .cursor: return "Cursor"
         case .pi: return "Pi"
+        case .grok: return "Grok Build"
+        case .remote: return "Remote"
         case .about: return "About"
         }
     }
@@ -1094,6 +1140,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         case .openClawCLI: return "o.circle"
         case .cursor: return "cursorarrow.rays"
         case .pi: return "p.circle"
+        case .grok: return "x.circle"
+        case .remote: return "globe"
         case .about: return "info.circle"
         }
     }
@@ -1101,7 +1149,7 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
 
 private extension PreferencesView {
     // Sidebar order: General → Agent Cockpit → Unified Window → Usage Tracking → Usage Probes → Menu Bar → Advanced → About → Agents
-    var visibleTabs: [PreferencesTab] { [.general, .agentCockpit, .unified, .usageTracking, .usageProbes, .menuBar, .advanced, .about, .codexCLI, .claudeResume, .opencode, .geminiCLI, .copilotCLI, .cursor, .pi, .hermesCLI, .openClawCLI] }
+    var visibleTabs: [PreferencesTab] { [.general, .agentCockpit, .unified, .usageTracking, .usageProbes, .menuBar, .advanced, .about, .codexCLI, .claudeResume, .opencode, .geminiCLI, .copilotCLI, .cursor, .pi, .grok, .remote, .hermesCLI, .openClawCLI] }
 }
 
 // MARK: - Probe helpers
@@ -1283,6 +1331,40 @@ extension PreferencesView {
         }
     }
 
+    func probeGrok() {
+        if grokProbeState == .probing { return }
+        grokProbeState = .probing
+        grokVersionString = nil
+        grokResolvedPath = nil
+        let override = grokSettings.binaryPath.isEmpty ? nil : grokSettings.binaryPath
+        let isAutoProbe = override == nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = GrokCLIEnvironment().probe(customPath: override)
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let res):
+                    self.grokVersionString = res.versionString
+                    self.grokResolvedPath = res.binaryURL.path
+                    if isAutoProbe {
+                        self.grokSettings.setResolvedBinaryPath(res.binaryURL.path)
+                        self.grokSettings.resolvedSupportsResume = res.supportsResume
+                        UserDefaults.standard.set(res.supportsResume, forKey: GrokSettings.Keys.resolvedSupportsResume)
+                    }
+                    self.grokProbeState = .success
+                    self.grokCLIAvailable = true
+                case .failure:
+                    self.grokVersionString = nil
+                    self.grokResolvedPath = nil
+                    if isAutoProbe {
+                        self.grokSettings.setResolvedBinaryPath(nil)
+                    }
+                    self.grokProbeState = .failure
+                    self.grokCLIAvailable = false
+                }
+            }
+        }
+    }
+
     func probeOpenClaw() {
         if openClawProbeState == .probing { return }
         openClawProbeState = .probing
@@ -1329,7 +1411,9 @@ extension PreferencesView {
             if cursorVersionString == nil && cursorProbeState != .probing { probeCursor() }
         case .pi:
             if piVersionString == nil && piProbeState != .probing { probePi() }
-        case .menuBar, .usageProbes, .general, .unified, .advanced, .agentCockpit, .about:
+        case .grok:
+            if grokVersionString == nil && grokProbeState != .probing { probeGrok() }
+        case .menuBar, .usageProbes, .general, .unified, .advanced, .agentCockpit, .about, .remote:
             break
         }
     }
@@ -1380,6 +1464,13 @@ extension PreferencesView {
         piProbeDebounce?.cancel()
         let work = DispatchWorkItem { probePi() }
         piProbeDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    func scheduleGrokProbe() {
+        grokProbeDebounce?.cancel()
+        let work = DispatchWorkItem { probeGrok() }
+        grokProbeDebounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
