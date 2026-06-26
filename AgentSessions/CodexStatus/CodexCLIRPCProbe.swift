@@ -14,6 +14,8 @@ private let log = OSLog(subsystem: "com.triada.AgentSessions", category: "CodexR
 // Handshake: send `initialize`, then `account/rateLimits/read`.
 
 actor CodexCLIRPCProbe {
+    private static let defaultSuccessCooldown: TimeInterval = 60
+
     private var permanentlyUnavailable = false
     private var lastProbeAt: Date? = nil
     private var lastProbeFailed = false
@@ -41,7 +43,7 @@ actor CodexCLIRPCProbe {
     }
 
     /// Returns a snapshot on success, nil on failure (caller falls through).
-    func fetchRateLimits(cooldownSuccess: TimeInterval = 10 * 60,
+    func fetchRateLimits(cooldownSuccess: TimeInterval = CodexCLIRPCProbe.defaultSuccessCooldown,
                          cooldownFailure: TimeInterval = 60 * 60) async -> CodexUsageSnapshot? {
         guard !permanentlyUnavailable else { return nil }
 
@@ -75,6 +77,12 @@ actor CodexCLIRPCProbe {
         }
     }
 
+#if DEBUG
+    nonisolated static var defaultSuccessCooldownForTesting: TimeInterval {
+        defaultSuccessCooldown
+    }
+#endif
+
     // MARK: - Private
 
     private enum RPCError: Error {
@@ -84,10 +92,14 @@ actor CodexCLIRPCProbe {
         case processError(String)
     }
 
+    private nonisolated static var appServerArguments: [String] {
+        ["app-server", "--listen", "stdio://"]
+    }
+
     private func runRPC(binary: URL) async throws -> CodexUsageSnapshot? {
         let process = Process()
         process.executableURL = binary
-        process.arguments = ["app-server", "--listen", "stdio://", "--session-source", "vscode"]
+        process.arguments = Self.appServerArguments
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -244,6 +256,10 @@ actor CodexCLIRPCProbe {
 #if DEBUG
     nonisolated static func parseRateLimitsResponseForTesting(_ data: Data) -> CodexUsageSnapshot? {
         parseRateLimitsResponseData(data)
+    }
+
+    nonisolated static var appServerArgumentsForTesting: [String] {
+        appServerArguments
     }
 #endif
 }

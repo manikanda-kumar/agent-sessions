@@ -6,7 +6,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
     let shownSessionCount: Int
     let isCompact: Bool
     let isLimitsOnly: Bool
-    let limitsRowCount: Int
+    let limitsContentHeight: CGFloat
     let activeEnabled: Bool
     let compactToolbarVisible: Bool
     let groupByProject: Bool
@@ -19,7 +19,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
             shownSessionCount: shownSessionCount,
             isCompact: isCompact,
             isLimitsOnly: isLimitsOnly,
-            limitsRowCount: limitsRowCount,
+            limitsContentHeight: limitsContentHeight,
             activeEnabled: activeEnabled,
             compactToolbarVisible: compactToolbarVisible,
             groupByProject: groupByProject,
@@ -94,7 +94,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
             let shownSessionCount: Int
             let isCompact: Bool
             let isLimitsOnly: Bool
-            let limitsRowCount: Int
+            let limitsContentHeight: CGFloat
             let activeEnabled: Bool
             let compactToolbarVisible: Bool
             let groupByProject: Bool
@@ -111,6 +111,8 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
         private var baselineStyleMask: NSWindow.StyleMask = []
         private var baselineMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         private var baselineMaxSizeCaptured = false
+        private var pendingFrameWorkItem: DispatchWorkItem?
+        private var isApplyingFrame = false
         private let fallbackStandardStyleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         private var currentMode: Mode?
         // Keep pinned cockpit above regular windows without covering system tooltip windows.
@@ -131,6 +133,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
         private let limitsMinimumWidth: CGFloat = 220
         private let limitsDefaultFrameWidth: CGFloat = 380
         private let limitsRowHeight: CGFloat = 30
+        private let limitsMaximumRows: CGFloat = 9
         private let compactHeaderHeight: CGFloat = 44.5
         private let compactDisabledCalloutHeight: CGFloat = 56
         private let fullDefaultFrameSize = NSSize(width: 644, height: 320)
@@ -157,6 +160,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
         }
 
         deinit {
+            pendingFrameWorkItem?.cancel()
             if window != nil {
 #if DEBUG
                 Self.recordDetach()
@@ -171,7 +175,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                 shownSessionCount: inputs.shownSessionCount,
                 isCompact: inputs.isCompact,
                 isLimitsOnly: inputs.isLimitsOnly,
-                limitsRowCount: inputs.limitsRowCount,
+                limitsContentHeight: inputs.limitsContentHeight,
                 activeEnabled: inputs.activeEnabled,
                 compactToolbarVisible: inputs.compactToolbarVisible,
                 groupByProject: inputs.groupByProject,
@@ -185,7 +189,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                         shownSessionCount: Int,
                         isCompact: Bool,
                         isLimitsOnly: Bool,
-                        limitsRowCount: Int,
+                        limitsContentHeight: CGFloat,
                         activeEnabled: Bool,
                         compactToolbarVisible: Bool,
                         groupByProject: Bool,
@@ -223,7 +227,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                 if isLimitsOnly {
                     let targetHeight = limitsWindowHeight(
                         for: window,
-                        rowCount: limitsRowCount,
+                        contentHeight: limitsContentHeight,
                         includesDisabledCallout: !activeEnabled,
                         includesToolbar: includesToolbarForStableSizing
                     )
@@ -249,12 +253,12 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                     activeEnabled: activeEnabled,
                     compactToolbarVisible: includesToolbarForStableSizing,
                     compactPreferredRows: clampedCompactPreferredRows,
-                    limitsRowCount: limitsRowCount
+                    limitsContentHeight: limitsContentHeight
                 )
                 if isLimitsOnly {
                     applyLimitsDefaultSize(
                         to: window,
-                        rowCount: limitsRowCount,
+                        contentHeight: limitsContentHeight,
                         activeEnabled: activeEnabled,
                         includesToolbar: compactToolbarVisible,
                         appliesDefaultWidth: false,
@@ -307,7 +311,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                     activeEnabled: activeEnabled,
                     compactToolbarVisible: true,
                     compactPreferredRows: clampedCompactPreferredRows,
-                    limitsRowCount: limitsRowCount
+                    limitsContentHeight: limitsContentHeight
                 )
                 lastAppliedCompactToolbarVisibility = nil
                 lastAppliedCompactPreferredRows = nil
@@ -429,7 +433,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                                          activeEnabled: Bool,
                                          compactToolbarVisible: Bool,
                                          compactPreferredRows: Int,
-                                         limitsRowCount: Int) {
+                                         limitsContentHeight: CGFloat) {
             guard currentMode != mode else { return }
 
             let previousMode = currentMode
@@ -445,7 +449,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
 
             let restoredFromCache: Bool = {
                 guard let cached = cachedFrameByMode[mode] else { return false }
-                window.setFrame(cached, display: true, animate: false)
+                setWindowFrame(cached, display: true, animate: false)
                 return true
             }()
             let restored = restoredFromCache || window.setFrameUsingName(targetAutosaveName)
@@ -454,7 +458,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                 case .limits:
                     self.applyLimitsDefaultSize(
                         to: window,
-                        rowCount: limitsRowCount,
+                        contentHeight: limitsContentHeight,
                         activeEnabled: activeEnabled,
                         includesToolbar: compactToolbarVisible,
                         appliesDefaultWidth: true,
@@ -515,16 +519,14 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
         }
 
         private func limitsWindowHeight(for window: NSWindow,
-                                        rowCount: Int,
+                                        contentHeight: CGFloat,
                                         includesDisabledCallout: Bool,
                                         includesToolbar: Bool) -> CGFloat {
             let chromeHeight = max(window.frame.height - window.contentLayoutRect.height, 0)
             let calloutHeight = includesDisabledCallout ? compactDisabledCalloutHeight : 0
-            let rows = CGFloat(max(1, min(rowCount, 2)))
-            let rowSeparators = max(rows - 1, 0) * 0.5
+            let clampedContentHeight = max(limitsRowHeight, min(contentHeight, limitsRowHeight * limitsMaximumRows))
             return (includesToolbar ? compactHeaderHeight + 0.5 : 0)
-                + (rows * limitsRowHeight)
-                + rowSeparators
+                + clampedContentHeight
                 + calloutHeight
                 + chromeHeight
         }
@@ -552,12 +554,12 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
             }
             if abs(previousHeight - targetHeight) <= 1 {
                 guard widthChanged else { return }
-                window.setFrame(frame, display: true, animate: true)
+                setWindowFrame(frame, display: true, animate: false)
                 return
             }
             frame.origin.y += previousHeight - targetHeight
             frame.size.height = targetHeight
-            window.setFrame(frame, display: true, animate: true)
+            setWindowFrame(frame, display: true, animate: false)
         }
 
         private func clampedPreferredCompactRows(_ rows: Int) -> Int {
@@ -593,7 +595,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
             var frame = window.frame
             frame.origin.y += frame.height - targetHeight
             frame.size.height = targetHeight
-            window.setFrame(frame, display: true, animate: false)
+            setWindowFrame(frame, display: true, animate: false)
         }
 
         private func applyCompactToolbarVisibilityTransition(to isVisible: Bool,
@@ -612,7 +614,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
 
             frame.origin.y += frame.height - targetHeight
             frame.size.height = targetHeight
-            window.setFrame(frame, display: true, animate: true)
+            setWindowFrame(frame, display: true, animate: false)
         }
 
         private func applyCompactVisibleRowsAutoHeight(shownSessionCount: Int,
@@ -633,7 +635,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
             var frame = window.frame
             frame.origin.y += frame.height - targetHeight
             frame.size.height = targetHeight
-            window.setFrame(frame, display: true, animate: false)
+            setWindowFrame(frame, display: true, animate: false)
         }
 
         private func applyFullDefaultSize(to window: NSWindow) {
@@ -650,11 +652,11 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
             frame.size.height = targetHeight
             // Preserve top edge when applying first-run defaults.
             frame.origin.y += oldHeight - targetHeight
-            window.setFrame(frame, display: true, animate: false)
+            setWindowFrame(frame, display: true, animate: false)
         }
 
         private func applyLimitsDefaultSize(to window: NSWindow,
-                                            rowCount: Int,
+                                            contentHeight: CGFloat,
                                             activeEnabled: Bool,
                                             includesToolbar: Bool,
                                             appliesDefaultWidth: Bool,
@@ -666,7 +668,7 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
                 window.minSize.height,
                 self.limitsWindowHeight(
                     for: window,
-                    rowCount: rowCount,
+                    contentHeight: contentHeight,
                     includesDisabledCallout: !activeEnabled,
                     includesToolbar: includesToolbar
                 )
@@ -680,8 +682,52 @@ struct AgentCockpitHUDWindowConfigurator: NSViewRepresentable {
 
             frame.size.width = targetWidth
             frame.size.height = targetHeight
-            frame.origin.y += oldHeight - targetHeight
-            window.setFrame(frame, display: true, animate: animated)
+            if shouldGrowLimitsWindowDown(window: window, targetHeight: targetHeight) {
+                frame.origin.y += oldHeight - targetHeight
+            }
+            setWindowFrame(frame, display: true, animate: false)
+        }
+
+        private func shouldGrowLimitsWindowDown(window: NSWindow, targetHeight: CGFloat) -> Bool {
+            guard targetHeight > window.frame.height,
+                  let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else {
+                return true
+            }
+            let frame = window.frame
+            let extraHeight = targetHeight - frame.height
+            let roomBelow = max(0, frame.minY - visibleFrame.minY)
+            let roomAbove = max(0, visibleFrame.maxY - frame.maxY)
+            if roomBelow >= extraHeight { return true }
+            if roomAbove >= extraHeight { return false }
+            return roomBelow >= roomAbove
+        }
+
+        private func setWindowFrame(_ frame: NSRect, display: Bool, animate: Bool) {
+            guard let window else { return }
+            let current = window.frame
+            guard abs(current.origin.x - frame.origin.x) > 1 ||
+                    abs(current.origin.y - frame.origin.y) > 1 ||
+                    abs(current.width - frame.width) > 1 ||
+                    abs(current.height - frame.height) > 1 else {
+                return
+            }
+
+            pendingFrameWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self, weak window] in
+                guard let self, let window, !self.isApplyingFrame else { return }
+                let current = window.frame
+                guard abs(current.origin.x - frame.origin.x) > 1 ||
+                        abs(current.origin.y - frame.origin.y) > 1 ||
+                        abs(current.width - frame.width) > 1 ||
+                        abs(current.height - frame.height) > 1 else {
+                    return
+                }
+                self.isApplyingFrame = true
+                window.setFrame(frame, display: display, animate: animate)
+                self.isApplyingFrame = false
+            }
+            pendingFrameWorkItem = work
+            DispatchQueue.main.async(execute: work)
         }
     }
 }

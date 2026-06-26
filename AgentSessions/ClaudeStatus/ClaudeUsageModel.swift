@@ -50,16 +50,20 @@ final class ClaudeUsageModel: ObservableObject {
     @Published var isUpdating: Bool = false
     @Published var lastSuccessAt: Date? = nil
     @Published var dataIsStale: Bool = false
+    @Published var unavailableMessage: String? = nil
 
     // Current source info for debug display
     @Published var currentSourceLabel: String = ""
     @Published var currentHealthLabel: String = ""
     @Published var lastRawOAuthPayload: String? = nil
+    @Published var fiveHourProjectedRunoutAt: Date? = nil
+    @Published var fiveHourProjectionObservedAt: Date? = nil
 
     private var sourceManager: ClaudeUsageSourceManager?
     // Kept for hard-probe diagnostics that need direct tmux access
     private var service: ClaudeStatusService?
     private let limitNotifier = UsageLimitNotifier.shared
+    private var fiveHourProjectionTracker = UsageLimitProjectionTracker()
     private var isEnabled: Bool = false
     private var stripVisible: Bool = false
     private var menuVisible: Bool = false
@@ -69,6 +73,19 @@ final class ClaudeUsageModel: ObservableObject {
     // NSApp is an IUO and can be nil this early in startup.
     private var appIsActive: Bool = false
     private var wakeObservers: [NSObjectProtocol] = []
+
+#if DEBUG
+    static var projectionDiagnosticsDefaultsForTesting: UserDefaults?
+#endif
+
+    private static var projectionDiagnosticsDefaults: UserDefaults {
+#if DEBUG
+        if let projectionDiagnosticsDefaultsForTesting {
+            return projectionDiagnosticsDefaultsForTesting
+        }
+#endif
+        return .standard
+    }
 
     func setEnabled(_ enabled: Bool) {
         if AppRuntime.isRunningTests {
@@ -188,6 +205,10 @@ final class ClaudeUsageModel: ObservableObject {
         }
         sourceManager = nil
         service = nil
+        fiveHourProjectionTracker.reset()
+        fiveHourProjectedRunoutAt = nil
+        fiveHourProjectionObservedAt = nil
+        recordProjectionDiagnostics(fiveHourProjectionTracker.lastDiagnostics, estimate: nil)
         removeWakeObservers()
     }
 
@@ -221,10 +242,36 @@ final class ClaudeUsageModel: ObservableObject {
     private func handleWake() {
         guard !AppRuntime.isRunningTests else { return }
         guard isEnabled else { return }
-        guard stripVisible || menuVisible else { return }
-        if UserDefaults.standard.bool(forKey: PreferencesKey.claudeUsageEnabled) == false { return }
-        guard Self.onACPower() else { return }
+        guard Self.shouldRefreshOnWake(
+            isRunningTests: AppRuntime.isRunningTests,
+            isEnabled: isEnabled,
+            stripVisible: stripVisible,
+            menuVisible: menuVisible,
+            cockpitVisible: cockpitVisible,
+            cockpitPinned: cockpitPinned,
+            appIsActive: appIsActive,
+            claudeUsageEnabled: UserDefaults.standard.bool(forKey: PreferencesKey.claudeUsageEnabled),
+            onACPower: Self.onACPower()
+        ) else { return }
         refreshNow()
+    }
+
+    private static func shouldRefreshOnWake(isRunningTests: Bool,
+                                            isEnabled: Bool,
+                                            stripVisible: Bool,
+                                            menuVisible: Bool,
+                                            cockpitVisible: Bool,
+                                            cockpitPinned: Bool,
+                                            appIsActive: Bool,
+                                            claudeUsageEnabled: Bool,
+                                            onACPower: Bool) -> Bool {
+        guard !isRunningTests else { return false }
+        guard isEnabled else { return false }
+        let effectiveVisible = menuVisible || cockpitPinned || ((stripVisible || cockpitVisible) && appIsActive)
+        guard effectiveVisible else { return false }
+        guard claudeUsageEnabled else { return false }
+        guard onACPower else { return false }
+        return true
     }
 
     private static func onACPower() -> Bool {
@@ -265,15 +312,9 @@ final class ClaudeUsageModel: ObservableObject {
         isUpdating = true
         Task { [weak self] in
             guard let self else { return }
-            // Create a short-lived service for the forced probe
-            let handler: @Sendable (ClaudeUsageSnapshot) -> Void = { snapshot in
-                Task { @MainActor in
-                    await Task.yield()
-                    self.apply(snapshot)
-                    // Persist immediately — the snapshot is right here, no ordering dependency
-                    self.persistHardProbeSnapshot(snapshot)
-                }
-            }
+            // Create a short-lived service for the forced probe. Apply the returned
+            // snapshot below so completion cannot race ahead of model publication.
+            let handler: @Sendable (ClaudeUsageSnapshot) -> Void = { _ in }
             let availability: @Sendable (ClaudeServiceAvailability) -> Void = { availability in
                 Task { @MainActor in
                     await Task.yield()
@@ -287,7 +328,18 @@ final class ClaudeUsageModel: ObservableObject {
             let svc = ClaudeStatusService(updateHandler: handler, availabilityHandler: availability)
             let diag = await svc.forceProbeNow()
             await MainActor.run {
-                if diag.success {
+                if let snapshot = diag.snapshot {
+                    self.apply(snapshot)
+                    self.persistHardProbeSnapshot(snapshot)
+                }
+                if diag.success, let unavailable = diag.unavailableMessage {
+                    self.unavailableMessage = unavailable
+                    self.dataIsStale = self.lastUpdate == nil ? true : self.dataIsStale
+                    self.recordUnavailableProjectionDiagnostics(unavailable)
+                } else if diag.success {
+                    self.unavailableMessage = nil
+                }
+                if diag.success && diag.unavailableMessage == nil && diag.snapshot != nil {
                     self.lastSuccessAt = Date()
                     setFreshUntil(for: .claude, until: Date().addingTimeInterval(UsageFreshnessTTL.probeFreshness))
                 }
@@ -331,6 +383,8 @@ final class ClaudeUsageModel: ObservableObject {
 
     /// Apply a normalized ClaudeLimitSnapshot from the source manager.
     private func applyLimitSnapshot(_ s: ClaudeLimitSnapshot) {
+        let now = Date()
+        let freshness = Self.alertFreshness(for: s, now: now)
         sessionRemainingPercent = clampPercent(s.fiveHourRemainingPercent)
         weekAllModelsRemainingPercent = clampPercent(s.weeklyRemainingPercent)
         weekOpusRemainingPercent = s.weekOpusRemainingPercent.map(clampPercent)
@@ -340,54 +394,175 @@ final class ClaudeUsageModel: ObservableObject {
         weekAllModelsResetText = s.weeklyResetText
         weekOpusResetText = s.weekOpusResetText
 
-        lastUpdate = Date()
+        lastUpdate = s.fetchedAt
+        unavailableMessage = nil
         currentSourceLabel = s.source.description
         currentHealthLabel = s.health.description
         dataIsStale = (s.health == .stale || s.health == .degraded)
+        updateFiveHourProjection(
+            remainingPercent: s.fiveHourRemainingPercent,
+            remainingPercentExact: s.fiveHourUsedRatio.map { 100 - ($0 * 100) },
+            resetText: s.fiveHourResetText,
+            freshness: freshness,
+            observedAt: s.fetchedAt,
+            now: now
+        )
         limitNotifier.handle(snapshot: usageLimitSnapshot(
             fiveHourRemainingPercent: s.fiveHourRemainingPercent,
+            fiveHourRemainingPercentExact: s.fiveHourUsedRatio.map { 100 - ($0 * 100) },
             fiveHourResetText: s.fiveHourResetText,
             weeklyRemainingPercent: s.weeklyRemainingPercent,
-            weeklyResetText: s.weeklyResetText
+            weeklyRemainingPercentExact: s.weeklyUsedRatio.map { 100 - ($0 * 100) },
+            weeklyResetText: s.weeklyResetText,
+            freshness: freshness,
+            observedAt: s.fetchedAt,
+            sourceDescription: s.source.description
         ))
         if isUpdating { isUpdating = false }
         if s.source == .oauthEndpoint { fetchRawOAuthPayload() }
     }
 
+#if DEBUG
+    static func shouldRefreshOnWakeForTesting(isRunningTests: Bool,
+                                              isEnabled: Bool,
+                                              stripVisible: Bool,
+                                              menuVisible: Bool,
+                                              cockpitVisible: Bool,
+                                              cockpitPinned: Bool,
+                                              appIsActive: Bool,
+                                              claudeUsageEnabled: Bool,
+                                              onACPower: Bool) -> Bool {
+        shouldRefreshOnWake(
+            isRunningTests: isRunningTests,
+            isEnabled: isEnabled,
+            stripVisible: stripVisible,
+            menuVisible: menuVisible,
+            cockpitVisible: cockpitVisible,
+            cockpitPinned: cockpitPinned,
+            appIsActive: appIsActive,
+            claudeUsageEnabled: claudeUsageEnabled,
+            onACPower: onACPower
+        )
+    }
+
+    func applyLimitSnapshotForTesting(_ snapshot: ClaudeLimitSnapshot) {
+        applyLimitSnapshot(snapshot)
+    }
+#endif
+
     /// Apply a ClaudeUsageSnapshot from the legacy tmux path (used for hard-probe results).
     private func apply(_ s: ClaudeUsageSnapshot) {
+        let now = Date()
         sessionRemainingPercent = clampPercent(s.sessionRemainingPercent)
         weekAllModelsRemainingPercent = clampPercent(s.weekAllModelsRemainingPercent)
         weekOpusRemainingPercent = s.weekOpusRemainingPercent.map(clampPercent)
         sessionResetText = s.sessionResetText
         weekAllModelsResetText = s.weekAllModelsResetText
         weekOpusResetText = s.weekOpusResetText
-        lastUpdate = Date()
+        lastUpdate = now
+        unavailableMessage = nil
         dataIsStale = false
+        updateFiveHourProjection(
+            remainingPercent: s.sessionRemainingPercent,
+            remainingPercentExact: nil,
+            resetText: s.sessionResetText,
+            freshness: .fresh,
+            observedAt: now,
+            now: now
+        )
         limitNotifier.handle(snapshot: usageLimitSnapshot(
             fiveHourRemainingPercent: s.sessionRemainingPercent,
+            fiveHourRemainingPercentExact: nil,
             fiveHourResetText: s.sessionResetText,
             weeklyRemainingPercent: s.weekAllModelsRemainingPercent,
-            weeklyResetText: s.weekAllModelsResetText
+            weeklyRemainingPercentExact: nil,
+            weeklyResetText: s.weekAllModelsResetText,
+            freshness: .fresh,
+            observedAt: lastUpdate,
+            sourceDescription: ClaudeUsageSource.tmuxUsage.description
         ))
         if isUpdating { isUpdating = false }
     }
 
+    private func recordUnavailableProjectionDiagnostics(_ message: String) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let diagnostics = trimmed.isEmpty ? "Claude usage unavailable" : trimmed
+        fiveHourProjectedRunoutAt = nil
+        fiveHourProjectionObservedAt = nil
+        recordProjectionDiagnostics(diagnostics, estimate: nil)
+    }
+
+    private func updateFiveHourProjection(remainingPercent: Int,
+                                          remainingPercentExact: Double?,
+                                          resetText: String,
+                                          freshness: UsageLimitAlertFreshness,
+                                          observedAt: Date,
+                                          now: Date) {
+        let hasFiveHour = !resetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let projectionEstimate = fiveHourProjectionTracker.update(with: UsageLimitProjectionSample(
+            source: .claude,
+            remainingPercent: remainingPercent,
+            remainingPercentExact: remainingPercentExact,
+            resetText: resetText,
+            hasRateLimit: hasFiveHour,
+            freshness: freshness,
+            observedAt: observedAt
+        ), now: now)
+        fiveHourProjectedRunoutAt = projectionEstimate?.runoutAt
+        fiveHourProjectionObservedAt = projectionEstimate?.observedAt
+        recordProjectionDiagnostics(fiveHourProjectionTracker.lastDiagnostics, estimate: projectionEstimate)
+    }
+
+    private func recordProjectionDiagnostics(_ value: String, estimate: UsageLimitProjectionEstimate?) {
+        let defaults = Self.projectionDiagnosticsDefaults
+        defaults.set(value, forKey: PreferencesKey.usageLimitDiagnosticsClaudeProjection)
+        defaults.set(
+            estimate?.runoutAt.timeIntervalSince1970 ?? 0,
+            forKey: PreferencesKey.usageLimitDiagnosticsClaudeProjectionRunoutAt
+        )
+        defaults.set(
+            estimate?.observedAt.timeIntervalSince1970 ?? 0,
+            forKey: PreferencesKey.usageLimitDiagnosticsClaudeProjectionObservedAt
+        )
+    }
+
     private func usageLimitSnapshot(fiveHourRemainingPercent: Int,
+                                    fiveHourRemainingPercentExact: Double?,
                                     fiveHourResetText: String,
                                     weeklyRemainingPercent: Int,
-                                    weeklyResetText: String) -> UsageLimitSnapshot {
+                                    weeklyRemainingPercentExact: Double?,
+                                    weeklyResetText: String,
+                                    freshness: UsageLimitAlertFreshness,
+                                    observedAt: Date?,
+                                    sourceDescription: String?) -> UsageLimitSnapshot {
         let hasFiveHour = !fiveHourResetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasWeekly = !weeklyResetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return UsageLimitSnapshot(
             provider: .claude,
             fiveHourRemainingPercent: fiveHourRemainingPercent,
+            fiveHourRemainingPercentExact: fiveHourRemainingPercentExact,
             fiveHourResetText: fiveHourResetText,
             hasFiveHourRateLimit: hasFiveHour,
             weeklyRemainingPercent: weeklyRemainingPercent,
+            weeklyRemainingPercentExact: weeklyRemainingPercentExact,
             weeklyResetText: weeklyResetText,
-            hasWeeklyRateLimit: hasWeekly
+            hasWeeklyRateLimit: hasWeekly,
+            freshness: freshness,
+            observedAt: observedAt,
+            sourceDescription: sourceDescription
         )
+    }
+
+    private static func alertFreshness(for snapshot: ClaudeLimitSnapshot, now: Date = Date()) -> UsageLimitAlertFreshness {
+        let age = now.timeIntervalSince(snapshot.fetchedAt)
+        switch (snapshot.source, snapshot.health) {
+        case (.oauthEndpoint, .live), (.webEndpoint, .live), (.tmuxUsage, .live):
+            return age <= 3 * 60 ? .fresh : .stale
+        case (.cachedOAuth, _), (.cachedWeb, _), (_, .degraded):
+            return age <= 10 * 60 ? .recentCached : .stale
+        default:
+            return .stale
+        }
     }
 
 }

@@ -49,6 +49,17 @@ struct QuotaData: Equatable {
     var lastUpdate: Date? = nil
     var eventTimestamp: Date? = nil
     var isUpdating: Bool = false
+    var fiveHourProjectedRunoutAt: Date? = nil
+    var fiveHourProjectionObservedAt: Date? = nil
+
+    var hasUsageData: Bool {
+        switch provider {
+        case .codex:
+            return eventTimestamp != nil || lastUpdate != nil || !fiveHourResetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !weekResetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .claude:
+            return lastUpdate != nil
+        }
+    }
 
     func resetDate(kind: String, raw: String) -> Date? {
         UsageResetText.resetDate(kind: kind, source: provider.usageSource, raw: raw)
@@ -68,7 +79,9 @@ struct QuotaData: Equatable {
             weekResetText: model.weekResetText,
             lastUpdate: model.lastUpdate,
             eventTimestamp: model.lastEventTimestamp,
-            isUpdating: model.isUpdating
+            isUpdating: model.isUpdating,
+            fiveHourProjectedRunoutAt: model.fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: model.fiveHourProjectionObservedAt
         )
     }
 
@@ -82,7 +95,9 @@ struct QuotaData: Equatable {
             weekResetText: model.weekAllModelsResetText,
             lastUpdate: model.lastUpdate,
             eventTimestamp: nil,
-            isUpdating: model.isUpdating
+            isUpdating: model.isUpdating,
+            fiveHourProjectedRunoutAt: model.fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: model.fiveHourProjectionObservedAt
         )
     }
 }
@@ -225,6 +240,7 @@ private struct IndexingIndicator: View {
 		    let showResetIndicators: Bool
 		    let showPill: Bool
 		    @AppStorage(PreferencesKey.usageDisplayMode) private var usageDisplayModeRaw: String = UsageDisplayMode.left.rawValue
+		    @AppStorage(PreferencesKey.usageLimitCockpitProjectionEnabled) private var projectedRunoutEnabled: Bool = true
 		    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var mode: UsageDisplayMode { modeOverride ?? (UsageDisplayMode(rawValue: usageDisplayModeRaw) ?? .left) }
@@ -240,6 +256,7 @@ private struct IndexingIndicator: View {
 	        var weekPercentLabelText: String
 	        var fiveHourResetLabelText: String
 	        var weekResetLabelText: String
+	        var fiveHourProjectionLabelText: String?
 	    }
 
 	    private var presentation: Presentation {
@@ -247,10 +264,11 @@ private struct IndexingIndicator: View {
 		        let weekResetRaw = data.weekResetText.trimmingCharacters(in: .whitespacesAndNewlines)
 		        let fiveUnavailable = isResetInfoUnavailable(raw: fiveResetRaw)
 		        let weekUnavailable = isResetInfoUnavailable(raw: weekResetRaw)
+		        let hasUsageData = data.hasUsageData
 		        let hasResetInfo = !((fiveResetRaw.isEmpty || fiveUnavailable) && (weekResetRaw.isEmpty || weekUnavailable))
 
-        let fiveLeft = clampPercent(data.fiveHourRemainingPercent)
-        let weekLeft = clampPercent(data.weekRemainingPercent)
+        let fiveLeft = hasUsageData ? clampPercent(data.fiveHourRemainingPercent) : 0
+        let weekLeft = hasUsageData ? clampPercent(data.weekRemainingPercent) : 0
         let fiveUsed = clampPercent(100 - fiveLeft)
         let weekUsed = clampPercent(100 - weekLeft)
 
@@ -266,6 +284,7 @@ private struct IndexingIndicator: View {
         }()
 
         let barFillPercent: Int = {
+            guard hasUsageData else { return 0 }
             switch mode {
             case .left: return bottleneckLeft
             case .used: return bottleneckUsed
@@ -295,6 +314,7 @@ private struct IndexingIndicator: View {
 	        let weekResetDate = data.resetDate(kind: "Wk", raw: data.weekResetText)
 
 	        let fiveResetDisplayText: String = {
+	            if !hasUsageData { return "Waiting" }
 	            if fiveUnavailable { return UsageStaleThresholds.unavailableCopy }
 	            let rel = formatRelativeTimeUntil(fiveResetDate)
 	            if rel != "—" { return rel }
@@ -304,6 +324,7 @@ private struct IndexingIndicator: View {
 	        }()
 
 	        let weekResetDisplayText: String = {
+	            if !hasUsageData { return "Waiting" }
 	            if weekUnavailable { return UsageStaleThresholds.unavailableCopy }
 	            let s = formatWeeklyReset(weekResetDate)
 	            if s != "—" { return s }
@@ -316,20 +337,32 @@ private struct IndexingIndicator: View {
 		            barFillPercent: barFillPercent,
 		            barFillColor: isCritical ? .red : .white,
 		            bottleneckUsedPercent: hasResetInfo ? bottleneckUsed : 0,
-		            fiveHourPercentLabelText: fiveUnavailable ? "--" : "\(mode.numericPercent(fromLeft: fiveLeft))%",
-		            weekPercentLabelText: weekUnavailable ? "--" : "\(mode.numericPercent(fromLeft: weekLeft))%",
+		            fiveHourPercentLabelText: (!hasUsageData || fiveUnavailable) ? "--" : "\(mode.numericPercent(fromLeft: fiveLeft))%",
+		            weekPercentLabelText: (!hasUsageData || weekUnavailable) ? "--" : "\(mode.numericPercent(fromLeft: weekLeft))%",
 		            fiveHourResetLabelText: fiveResetDisplayText,
-		            weekResetLabelText: weekResetDisplayText
+		            weekResetLabelText: weekResetDisplayText,
+		            fiveHourProjectionLabelText: projectedRunoutEnabled
+		                ? formatUsageProjectionLabel(
+		                    runoutAt: data.fiveHourProjectedRunoutAt,
+		                    observedAt: data.fiveHourProjectionObservedAt
+		                )
+		                : nil
 		        )
 		    }
 
-	    @ViewBuilder
-	    private func resetIndicator(labelText: String) -> some View {
-	        HStack(spacing: 4) {
-	            Text("↻")
-	            Text(labelText)
-	        }
-	    }
+		    @ViewBuilder
+		    private func resetIndicator(labelText: String) -> some View {
+		        HStack(spacing: 4) {
+		            Text("↻")
+		            Text(labelText)
+		        }
+		    }
+
+            private var projectionColor: Color {
+                isDarkMode
+                    ? Color(red: 1.0, green: 0.60, blue: 0.12)
+                    : Color(red: 0.82, green: 0.30, blue: 0.00)
+            }
 
 		    @ViewBuilder
 		    private var inner: some View {
@@ -354,7 +387,14 @@ private struct IndexingIndicator: View {
 		            HStack(spacing: 6) {
 		                switch scope {
 		                case .fiveHour:
-		                    Text("5h: \(presentation.fiveHourPercentLabelText)")
+			                    HStack(spacing: 4) {
+			                        Text("5h: \(presentation.fiveHourPercentLabelText)")
+			                        if let projection = presentation.fiveHourProjectionLabelText {
+			                            Text(projection)
+                                            .fontWeight(.bold)
+                                            .foregroundStyle(projectionColor)
+			                        }
+			                    }
 		                    if showResetIndicators {
 		                        DividerText(baseForeground: baseForeground)
 		                        resetIndicator(labelText: presentation.fiveHourResetLabelText)
@@ -366,7 +406,14 @@ private struct IndexingIndicator: View {
 		                        resetIndicator(labelText: presentation.weekResetLabelText)
 		                    }
 		                case .both:
-		                    Text("5h: \(presentation.fiveHourPercentLabelText)")
+			                    HStack(spacing: 4) {
+			                        Text("5h: \(presentation.fiveHourPercentLabelText)")
+			                        if let projection = presentation.fiveHourProjectionLabelText {
+			                            Text(projection)
+                                            .fontWeight(.bold)
+                                            .foregroundStyle(projectionColor)
+			                        }
+			                    }
 		                    if showResetIndicators {
 		                        DividerText(baseForeground: baseForeground)
 		                        resetIndicator(labelText: presentation.fiveHourResetLabelText)

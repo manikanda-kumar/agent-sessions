@@ -21,7 +21,7 @@ Search, inspect, save, and resume local AI-coding sessions from CLI tools, deskt
 - Security & Privacy: Local-only. No telemetry. Details: `docs/PRIVACY.md` and `docs/security.md`
 
 <p align="center">
-  <a href="https://github.com/jazzyalex/agent-sessions/releases/download/v3.9.1/AgentSessions-3.9.1.dmg"><b>Download Agent Sessions 3.9.1 (DMG)</b></a>
+  <a href="https://github.com/jazzyalex/agent-sessions/releases/download/v3.9.3/AgentSessions-3.9.3.dmg"><b>Download Agent Sessions 3.9.3 (DMG)</b></a>
   •
   <a href="https://github.com/jazzyalex/agent-sessions/releases">All Releases</a>
   •
@@ -69,11 +69,14 @@ Details: `docs/PRIVACY.md` and `docs/security.md`.
 
 ## What's New in 3.9
 
-**TL;DR** - Limits Widget keeps Codex and Claude limits visible without using menu bar space.
+**TL;DR** - Quota Meter now adds freshness-aware run-out predictions and Limit Alerts.
 
-**Highlights:** MacBook users can pin a tiny always-on limits window instead of opening the full Agent Cockpit or relying on a crowded menu bar item. It shows Codex and Claude 5h/weekly usage, adapts reset times to the available width, and pairs with new shared limit notifications for approaching, exhausted, and reset limits.
+**Highlights:** MacBook users can pin a tiny always-on limits window instead of opening the full Agent Cockpit or relying on a crowded menu bar item. It shows Codex and Claude 5h/weekly usage, keeps visible usage sources fresh, surfaces projected 5h run-out ETAs before the final warning window, and adds a dedicated Limit Alerts pane with separate controls for predicted exhaustion and threshold warnings.
 
 Also new in 3.9:
+- Update tours now introduce Quota Meter prediction markers and Limit Alerts.
+- The Dock tile right-click menu now includes Hide Dock Icon.
+- Turning off the menu bar item now persists across relaunches by restoring the Dock path instead of re-enabling the menu bar item.
 - Unified Window controls to collapse or expand visible session hierarchy groups.
 - A persistent Transcript Window toggle for list-focused browsing.
 - Saved-only session counts when the saved filter is active.
@@ -93,7 +96,7 @@ Also new in 3.9:
 - Unified Search and Image Browser across sessions, plus in-session Find for fast transcript navigation.
 - Readable tool calls/outputs and navigation between prompts, tools, and errors.
 - Right-click Copy Resume Command or Resume for supported CLI sessions, with Terminal.app, iTerm2, and Warp launch targets.
-- Agent Cockpit is the live command center for active Codex CLI, Claude CLI, and OpenCode CLI iTerm2 sessions, with a compact Limits Widget for always-on Codex and Claude usage visibility.
+- Agent Cockpit is the live command center for active Codex CLI, Claude CLI, and OpenCode CLI iTerm2 sessions, with a compact Quota Meter for always-on Codex and Claude usage visibility, freshness diagnostics, and projected run-out alerts.
 - Local-only indexing designed for large histories.
 
 ## Agent Cockpit (Beta)
@@ -101,8 +104,8 @@ Also new in 3.9:
 Agent Cockpit is the live command center for active iTerm2 [Codex CLI](docs/guides/codex-local-history.html), [Claude CLI](docs/guides/claude-code-jsonl-history.html), and [OpenCode CLI](docs/guides/opencode-sqlite-history.html) sessions, with shared active/waiting summaries and live Claude usage tracking.
 
 <div align="center">
-  <p style="margin:0 0 0px 0;"><em>Limits Widget for Codex and Claude usage</em></p>
-  <img src="docs/assets/limits-widget-light.png" alt="Small Limits Widget showing Codex and Claude 5h and weekly usage" width="100%" style="max-width:700px;border-radius:8px;margin:5px 0 22px;"/>
+  <p style="margin:0 0 0px 0;"><em>Quota Meter with 5h burn predictions</em></p>
+  <img src="docs/assets/quota-meter-light.png" alt="Small Quota Meter showing Codex and Claude 5h burn predictions, reset timing, and weekly pressure" width="100%" style="max-width:770px;border-radius:8px;margin:5px 0 22px;"/>
 
   <p style="margin:0 0 0px 0;"><em>Agent Cockpit</em></p>
   <img src="docs/assets/screenshot-cockpit-light.png" alt="Compact cockpit menu showing grouped active sessions in Light Mode" width="100%" style="max-width:820px;border-radius:8px;margin:5px 0;"/>
@@ -133,7 +136,7 @@ Agent Cockpit is the live command center for active iTerm2 [Codex CLI](docs/guid
 ## Install
 
 ### Option A — Download DMG
-1. [Download AgentSessions-3.9.1.dmg](https://github.com/jazzyalex/agent-sessions/releases/download/v3.9.1/AgentSessions-3.9.1.dmg)
+1. [Download AgentSessions-3.9.3.dmg](https://github.com/jazzyalex/agent-sessions/releases/download/v3.9.3/AgentSessions-3.9.3.dmg)
 2. Drag **Agent Sessions.app** into Applications.
 
 ### Option B — Homebrew

@@ -41,14 +41,14 @@ struct ClaudeWebRawUsageResponse: Decodable {
 //
 // Shares the same error type as ClaudeOAuthUsageClient (same semantics).
 // Org UUID is cached in-memory (doesn't change within a session).
-// Response is cached in /tmp/claude/statusline-webapi-cache.json (60s TTL).
+// Response is cached in /tmp/claude/statusline-webapi-cache.json (3m TTL).
 
 actor ClaudeWebUsageClient {
     private let session: URLSession
     private var cachedOrgId: String?
 
     private static let sharedCacheURL = URL(fileURLWithPath: "/tmp/claude/statusline-webapi-cache.json")
-    private static let cacheMaxAge: TimeInterval = 60
+    private static let cacheMaxAge: TimeInterval = 3 * 60
 
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -61,10 +61,10 @@ actor ClaudeWebUsageClient {
         cachedOrgId = nil
     }
 
-    func fetch(sessionKey: String) async throws -> (response: ClaudeWebRawUsageResponse, bodyHash: String, fromCache: Bool) {
+    func fetch(sessionKey: String) async throws -> (response: ClaudeWebRawUsageResponse, bodyHash: String, fromCache: Bool, fetchedAt: Date) {
         if let cached = readSharedCache() {
             os_log("ClaudeOAuth: web API — serving from cache", log: log, type: .debug)
-            return (cached.response, cached.bodyHash, true)
+            return (cached.response, cached.bodyHash, true, cached.fetchedAt)
         }
 
         let orgId = try await resolveOrgId(sessionKey: sessionKey)
@@ -102,7 +102,7 @@ actor ClaudeWebUsageClient {
 
         writeSharedCache(data: data)
         os_log("ClaudeOAuth: web API fetch succeeded", log: log, type: .debug)
-        return (parsed, bodyHash, false)
+        return (parsed, bodyHash, false, Date())
     }
 
     // MARK: - Org ID resolution
@@ -145,6 +145,7 @@ actor ClaudeWebUsageClient {
     private struct CachedResult {
         let response: ClaudeWebRawUsageResponse
         let bodyHash: String
+        let fetchedAt: Date
     }
 
     private func readSharedCache() -> CachedResult? {
@@ -152,13 +153,32 @@ actor ClaudeWebUsageClient {
         guard FileManager.default.fileExists(atPath: url.path),
               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let mtime = attrs[.modificationDate] as? Date,
-              Date().timeIntervalSince(mtime) < Self.cacheMaxAge,
+              Self.isCacheFresh(modificationDate: mtime),
               let data = try? Data(contentsOf: url),
               let parsed = try? JSONDecoder().decode(ClaudeWebRawUsageResponse.self, from: data)
         else { return nil }
         let bodyHash = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
-        return CachedResult(response: parsed, bodyHash: bodyHash)
+        return CachedResult(response: parsed, bodyHash: bodyHash, fetchedAt: mtime)
     }
+
+    private nonisolated static func isCacheFresh(modificationDate: Date, now: Date = Date()) -> Bool {
+        now.timeIntervalSince(modificationDate) < cacheMaxAge
+    }
+
+#if DEBUG
+    nonisolated static var cacheMaxAgeForTesting: TimeInterval {
+        cacheMaxAge
+    }
+
+    nonisolated static var sharedCacheURLForTesting: URL {
+        sharedCacheURL
+    }
+
+    nonisolated static func isCacheFreshForTesting(age: TimeInterval) -> Bool {
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        return isCacheFresh(modificationDate: now.addingTimeInterval(-age), now: now)
+    }
+#endif
 
     private func writeSharedCache(data: Data) {
         let dir = Self.sharedCacheURL.deletingLastPathComponent()

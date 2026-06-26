@@ -86,6 +86,7 @@ struct HUDRow: Identifiable, Equatable {
     let cleanedTabTitle: String?
     let resolvedSessionID: String?
     let runtimeSessionID: String?
+    let parentSessionID: String?
     let logPath: String?
     let workingDirectory: String?
     let lastActivityAt: Date?
@@ -111,6 +112,7 @@ struct HUDRow: Identifiable, Equatable {
          cleanedTabTitle: String? = nil,
          resolvedSessionID: String? = nil,
          runtimeSessionID: String? = nil,
+         parentSessionID: String? = nil,
          logPath: String? = nil,
          workingDirectory: String? = nil,
          lastActivityAt: Date? = nil,
@@ -135,6 +137,7 @@ struct HUDRow: Identifiable, Equatable {
         self.cleanedTabTitle = cleanedTabTitle
         self.resolvedSessionID = resolvedSessionID
         self.runtimeSessionID = runtimeSessionID
+        self.parentSessionID = parentSessionID
         self.logPath = logPath
         self.workingDirectory = workingDirectory
         self.lastActivityAt = lastActivityAt
@@ -161,6 +164,7 @@ struct HUDRow: Identifiable, Equatable {
             && lhs.cleanedTabTitle == rhs.cleanedTabTitle
             && lhs.resolvedSessionID == rhs.resolvedSessionID
             && lhs.runtimeSessionID == rhs.runtimeSessionID
+            && lhs.parentSessionID == rhs.parentSessionID
             && lhs.logPath == rhs.logPath
             && lhs.workingDirectory == rhs.workingDirectory
             && lhs.lastActivityAt == rhs.lastActivityAt
@@ -188,7 +192,16 @@ enum AgentCockpitHUDDisplayMode: String, CaseIterable, Identifiable {
         switch self {
         case .full: return "Full"
         case .compact: return "Compact"
-        case .limits: return "Limits"
+        case .limits: return "Quota Meter"
+        }
+    }
+
+    /// Compact label for the toolbar pill (full names live in the popover).
+    var shortLabel: String {
+        switch self {
+        case .full: return "Full"
+        case .compact: return "Compact"
+        case .limits: return "Meter"
         }
     }
 
@@ -281,6 +294,7 @@ struct LegacyMappedRow: Identifiable {
     let tabTitle: String?
     let resolvedSessionID: String?
     let sessionID: String?
+    let parentSessionID: String?
     let logPath: String?
     let workingDirectory: String?
     let lastActivityAt: Date?
@@ -583,6 +597,7 @@ struct AgentCockpitHUDView: View {
     @State private var manuallyExpandedStaleProjects: Set<String> = []
     @State private var presentationState: HUDPresentationState = .empty
     @StateObject private var derivedState: AgentCockpitHUDDerivedStateModel
+    @State private var limitsContentHeight: CGFloat = 30
     @FocusState private var isSearchFocused: Bool
 
     private let fullBodyMinHeight: CGFloat = 170
@@ -630,17 +645,18 @@ struct AgentCockpitHUDView: View {
         hudDisplayMode == .limits
     }
 
-    private var limitsRowCount: Int {
-        var count = 0
-        if codexAgentEnabledForLimits && codexUsageEnabledForLimits { count += 1 }
-        if claudeAgentEnabledForLimits && claudeUsageEnabledForLimits { count += 1 }
-        return max(1, min(count, 2))
+    private var measuredLimitsContentHeight: CGFloat {
+        guard isLimitsOnly else { return 30 }
+        return max(30, limitsContentHeight)
     }
 
     @AppStorage(PreferencesKey.codexUsageEnabled) private var codexUsageEnabledForLimits: Bool = false
     @AppStorage(PreferencesKey.claudeUsageEnabled) private var claudeUsageEnabledForLimits: Bool = false
     @AppStorage(PreferencesKey.Agents.codexEnabled) private var codexAgentEnabledForLimits: Bool = true
     @AppStorage(PreferencesKey.Agents.claudeEnabled) private var claudeAgentEnabledForLimits: Bool = true
+    @AppStorage(PreferencesKey.quotaMeterRunwayVisibility) private var runwayVisibilityRaw = QuotaMeterRunwayVisibility.automatic.rawValue
+    @State private var showRunwayPopover = false
+    @State private var showModePopover = false
 
     init(codexIndexer: SessionIndexer, claudeIndexer: ClaudeSessionIndexer, opencodeIndexer: OpenCodeSessionIndexer) {
         self.codexIndexer = codexIndexer
@@ -818,6 +834,10 @@ struct AgentCockpitHUDView: View {
         .onHover { hovering in
             handleCompactWindowHoverChange(hovering)
         }
+        .onPreferenceChange(LimitsContentHeightKey.self) { height in
+            guard height.isFinite, height > 0 else { return }
+            limitsContentHeight = height
+        }
         .applyIf(isCompact) { view in
             view.ignoresSafeArea(.container, edges: .top)
         }
@@ -844,7 +864,7 @@ struct AgentCockpitHUDView: View {
                 shownSessionCount: displayState.shownSessionCount,
                 isCompact: isCompact,
                 isLimitsOnly: isLimitsOnly,
-                limitsRowCount: limitsRowCount,
+                limitsContentHeight: measuredLimitsContentHeight,
                 activeEnabled: activeEnabled,
                 compactToolbarVisible: showsCompactToolbar,
                 groupByProject: groupByProject,
@@ -892,7 +912,7 @@ struct AgentCockpitHUDView: View {
             }
 
             if isLimitsOnly {
-                HUDLimitsRowsPanel()
+                HUDLimitsRowsPanel(activeRows: displayState.rowsForDisplay)
             } else {
                 bodyList(
                     visibleRows: displayState.visibleRows,
@@ -907,7 +927,7 @@ struct AgentCockpitHUDView: View {
             }
 
             if showLimits && !isLimitsOnly {
-                HUDLimitsBar()
+                HUDLimitsBar(activeRows: displayState.rowsForDisplay)
             }
 
             hiddenShortcuts(renderedRows: displayState.renderedRows)
@@ -1063,14 +1083,29 @@ struct AgentCockpitHUDView: View {
                         HStack(spacing: 6) {
                             cockpitOpenButton
                             cockpitModePicker
+                            if runwayControlAvailable {
+                                cockpitRunwayButton
+                            }
                             cockpitSettingsButton
                             cockpitPinButton
                         }
                         .fixedSize(horizontal: true, vertical: false)
 
                         HStack(spacing: 6) {
-                            cockpitOpenButton
                             cockpitModePicker
+                            if runwayControlAvailable {
+                                cockpitRunwayButton
+                            }
+                            cockpitSettingsButton
+                            cockpitPinButton
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+
+                        HStack(spacing: 6) {
+                            cockpitModePicker
+                            if runwayControlAvailable {
+                                cockpitRunwayButton
+                            }
                             cockpitPinButton
                         }
                         .fixedSize(horizontal: true, vertical: false)
@@ -1148,26 +1183,32 @@ struct AgentCockpitHUDView: View {
     }
 
     private var cockpitModePicker: some View {
-        Picker("", selection: Binding(
-            get: { hudDisplayModeRaw },
-            set: { raw in
-                guard let mode = AgentCockpitHUDDisplayMode(rawValue: raw) else { return }
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    setHUDDisplayMode(mode)
-                }
-            }
-        )) {
-            ForEach(AgentCockpitHUDDisplayMode.allCases) { mode in
-                Label(mode.title, systemImage: mode.systemImage)
-                    .labelStyle(.iconOnly)
-                    .tag(mode.rawValue)
+        let mode = AgentCockpitHUDDisplayMode(rawValue: hudDisplayModeRaw) ?? .full
+        return Button {
+            showModePopover.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: mode.systemImage)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(mode.shortLabel)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .opacity(0.6)
             }
         }
-        .labelsHidden()
-        .pickerStyle(.segmented)
-        .controlSize(.small)
-        .frame(width: 86)
-        .help("Switch Agent Cockpit mode: Full, Compact, or Limits.")
+        .buttonStyle(HUDIconButtonStyle(isOn: showModePopover, tint: nil))
+        .help("Switch Agent Cockpit view: Full, Compact, or Quota Meter.")
+        .popover(isPresented: $showModePopover, arrowEdge: .bottom) {
+            HUDCockpitModePopover(
+                selectedRaw: hudDisplayModeRaw,
+                onSelect: { selected in
+                    showModePopover = false
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        setHUDDisplayMode(selected)
+                    }
+                }
+            )
+        }
     }
 
     private var cockpitSettingsButton: some View {
@@ -1194,6 +1235,32 @@ struct AgentCockpitHUDView: View {
         }
         .buttonStyle(HUDIconButtonStyle(isOn: isPinned, tint: isPinned ? .orange : nil))
         .help(isPinned ? "Unpin — stop keeping on top" : "Pin — keep above all windows")
+    }
+
+    private var runwayControlAvailable: Bool {
+        codexAgentEnabledForLimits && codexUsageEnabledForLimits
+    }
+
+    private var cockpitRunwayButton: some View {
+        let visibility = QuotaMeterRunwayVisibility.current(raw: runwayVisibilityRaw)
+        let isForced = visibility != .automatic
+        return Button {
+            showRunwayPopover.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.swap")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text(visibility.shortLabel)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .opacity(0.6)
+            }
+        }
+        .buttonStyle(HUDIconButtonStyle(isOn: isForced, tint: nil))
+        .help("Runway drawer: choose when the Codex session runway appears.")
+        .popover(isPresented: $showRunwayPopover, arrowEdge: .bottom) {
+            HUDRunwayVisibilityPopover(runwayVisibilityRaw: $runwayVisibilityRaw)
+        }
     }
 
     private func limitsCounterPill(color: Color, count: Int, help: String) -> some View {
@@ -2140,6 +2207,7 @@ struct AgentCockpitHUDView: View {
                 tabTitle: presence.terminal?.tabTitle,
                 resolvedSessionID: session?.id,
                 sessionID: Self.authoritativeSessionID(for: presence, resolvedSession: session),
+                parentSessionID: session?.parentSessionID,
                 logPath: presence.sessionLogPath,
                 workingDirectory: session?.cwd ?? presence.workspaceRoot,
                 lastActivityAt: lastActivityAt,
@@ -2189,6 +2257,7 @@ struct AgentCockpitHUDView: View {
                 cleanedTabTitle: cleanedTabTitle,
                 resolvedSessionID: row.resolvedSessionID,
                 runtimeSessionID: row.sessionID,
+                parentSessionID: row.parentSessionID,
                 logPath: row.logPath,
                 workingDirectory: row.workingDirectory,
                 lastActivityAt: row.lastActivityAt,
@@ -2762,6 +2831,7 @@ struct AgentCockpitHUDView: View {
             tabTitle: winner.tabTitle ?? loser.tabTitle,
             resolvedSessionID: winner.resolvedSessionID ?? loser.resolvedSessionID,
             sessionID: winner.sessionID ?? loser.sessionID,
+            parentSessionID: winner.parentSessionID ?? loser.parentSessionID,
             logPath: winner.logPath ?? loser.logPath,
             workingDirectory: winner.workingDirectory ?? loser.workingDirectory,
             lastActivityAt: winner.lastActivityAt ?? loser.lastActivityAt,
@@ -3168,11 +3238,337 @@ private struct HUDLimitsProviderEntry {
     let isInitialLoading: Bool
     /// For Codex: the JSONL event timestamp. For Claude: the last poll time.
     let lastDataTimestamp: Date?
+    let fiveHourProjectedRunoutAt: Date?
+    let fiveHourProjectionObservedAt: Date?
+}
+
+private extension CodexRunwaySnapshot {
+    var hasRunwayContent: Bool {
+        !rows.isEmpty || burstSummary != nil
+    }
+
+    var runwayVisibleRowCount: Int {
+        rows.count + (burstSummary == nil ? 0 : 1)
+    }
+
+    var runwayPanelRows: Int {
+        if hasRunwayContent {
+            return min(5, runwayVisibleRowCount)
+        }
+        return 1
+    }
+}
+
+private func quotaMeterVisibleRunwaySnapshot(from snapshot: CodexRunwaySnapshot?,
+                                             visibility: QuotaMeterRunwayVisibility) -> CodexRunwaySnapshot? {
+    guard let snapshot else { return nil }
+    switch visibility {
+    case .automatic:
+        return snapshot.hasRunwayContent ? snapshot : nil
+    case .alwaysOn:
+        return snapshot
+    case .alwaysOff:
+        return nil
+    }
+}
+
+private struct LimitsContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private enum HUDExpansionDirection {
+    case up
+    case down
+}
+
+private struct HUDWindowExpansionDirectionReader: NSViewRepresentable {
+    let onChange: (HUDExpansionDirection) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { [weak view] in
+            context.coordinator.update(from: view?.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onChange = onChange
+        DispatchQueue.main.async { [weak nsView] in
+            context.coordinator.update(from: nsView?.window)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onChange: onChange)
+    }
+
+    final class Coordinator {
+        var onChange: (HUDExpansionDirection) -> Void
+        private var lastDirection: HUDExpansionDirection?
+
+        init(onChange: @escaping (HUDExpansionDirection) -> Void) {
+            self.onChange = onChange
+        }
+
+        func update(from window: NSWindow?) {
+            guard let window,
+                  let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else {
+                emit(.up)
+                return
+            }
+            let frame = window.frame
+            let direction: HUDExpansionDirection = frame.midY >= visibleFrame.midY ? .down : .up
+            emit(direction)
+        }
+
+        private func emit(_ direction: HUDExpansionDirection) {
+            guard direction != lastDirection else { return }
+            lastDirection = direction
+            onChange(direction)
+        }
+    }
 }
 
 /// An isolated view that observes usage models independently so that
 /// polling updates don't cause the entire AgentCockpitHUDView to re-render.
+enum HUDRunwayIdentityReducer {
+    static func identities(from rows: [HUDRow], source: SessionSource = .codex) -> [RunwaySessionIdentity] {
+        let candidates = rows.compactMap { row -> RunwayHUDCandidate? in
+            guard row.source == source, row.liveState == .active else { return nil }
+            guard let logPath = row.logPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !logPath.isEmpty else {
+                return nil
+            }
+
+            let parentID = row.parentSessionID?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let nonEmptyParentID = parentID.flatMap { $0.isEmpty ? nil : $0 }
+            let sessionID = row.resolvedSessionID
+                ?? row.runtimeSessionID
+                ?? row.id
+            return RunwayHUDCandidate(
+                sessionID: sessionID,
+                parentSessionID: nonEmptyParentID,
+                displayName: compactName(for: row),
+                logPath: logPath
+            )
+        }
+
+        let candidateBySessionID = Dictionary(
+            candidates.map { ($0.sessionID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let parentBySessionID = Dictionary(
+            candidates.compactMap { candidate -> (String, String)? in
+                guard let parentSessionID = candidate.parentSessionID,
+                      parentSessionID != candidate.sessionID else {
+                    return nil
+                }
+                return (candidate.sessionID, parentSessionID)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var grouped: [String: (displayName: String, paths: Set<String>, hasRootRow: Bool)] = [:]
+        var order: [String] = []
+
+        for candidate in candidates {
+            let key = rootSessionID(for: candidate, parentBySessionID: parentBySessionID)
+            let display = candidateBySessionID[key]?.displayName ?? candidate.displayName
+            let isParentRow = candidate.sessionID == key
+
+            if var existing = grouped[key] {
+                existing.paths.insert(candidate.logPath)
+                if isParentRow && !existing.hasRootRow {
+                    existing.displayName = display
+                    existing.hasRootRow = true
+                }
+                grouped[key] = existing
+            } else {
+                order.append(key)
+                grouped[key] = (
+                    displayName: display,
+                    paths: [candidate.logPath],
+                    hasRootRow: candidateBySessionID[key] != nil
+                )
+            }
+        }
+
+        return order.compactMap { key in
+            guard let group = grouped[key] else { return nil }
+            return RunwaySessionIdentity(
+                id: key,
+                displayName: group.displayName,
+                isGoal: false,
+                logPaths: Array(group.paths).sorted()
+            )
+        }
+    }
+
+    private static func rootSessionID(for candidate: RunwayHUDCandidate,
+                                      parentBySessionID: [String: String]) -> String {
+        var current = candidate.parentSessionID ?? candidate.sessionID
+        var seen: Set<String> = [candidate.sessionID]
+        while let parent = parentBySessionID[current],
+              parent != current,
+              !seen.contains(parent) {
+            seen.insert(current)
+            current = parent
+        }
+        return current
+    }
+
+    private static func compactName(for row: HUDRow) -> String {
+        let candidates = [
+            row.displayName,
+            row.cleanedTabTitle,
+            row.workingDirectory.map { URL(fileURLWithPath: $0).lastPathComponent }
+        ]
+        let fallback = "\(row.source.displayName) session"
+        let trimmed = candidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && !isPlaceholderTitle($0) } ?? fallback
+        guard !trimmed.isEmpty else { return fallback }
+        if trimmed.count <= 28 { return trimmed }
+        return String(trimmed.prefix(27)) + "…"
+    }
+
+    private static func isPlaceholderTitle(_ title: String) -> Bool {
+        // Match only the synthesized fallbacks ("Active <Agent> session" /
+        // "Session <id>"), not legitimate user titles that happen to start
+        // with "Active" and end with "session".
+        if title.hasPrefix("Session ") { return true }
+        let agentNames = SessionSource.allCases.flatMap { source in
+            [source.displayName, source.rawValue.capitalized]
+        }
+        return agentNames.contains { title == "Active \($0) session" }
+    }
+
+    private struct RunwayHUDCandidate {
+        let sessionID: String
+        let parentSessionID: String?
+        let displayName: String
+        let logPath: String
+    }
+}
+
+enum HUDRunwayRequestBuilder {
+    static func request(activeRows: [HUDRow],
+                        projectedRunoutEnabled: Bool,
+                        codexAgentEnabled: Bool,
+                        codexUsageEnabled: Bool,
+                        fiveHourRemainingPercent: Int,
+                        fiveHourResetText: String,
+                        fiveHourProjectedRunoutAt: Date?,
+                        fiveHourProjectionObservedAt: Date?,
+                        now: Date,
+                        maxRows: Int,
+                        forceVisible: Bool = false) -> CodexRunwaySnapshotRequest? {
+        // When the user forces the drawer on, build the request even at 0%
+        // remaining so any active session still shows a real runway row.
+        guard codexAgentEnabled,
+              codexUsageEnabled,
+              forceVisible || fiveHourRemainingPercent > 0,
+              let resetAt = UsageResetText.resetDate(
+                kind: "5h",
+                source: .codex,
+                raw: fiveHourResetText,
+                now: now
+              ) else {
+            return nil
+        }
+        let freshProjectionObservedAt: Date? = {
+            guard projectedRunoutEnabled,
+                  let observedAt = fiveHourProjectionObservedAt,
+                  now.timeIntervalSince(observedAt) <= 3 * 60 else {
+                return nil
+            }
+            return observedAt
+        }()
+        let observedAt = freshProjectionObservedAt ?? now
+        let runoutAt = freshProjectionObservedAt.flatMap { _ in fiveHourProjectedRunoutAt } ?? resetAt
+        guard resetAt > observedAt,
+              runoutAt > observedAt else {
+            return nil
+        }
+
+        let baseline = RunwayProviderBaseline(
+            source: .codex,
+            remainingPercent: Double(fiveHourRemainingPercent),
+            resetAt: resetAt,
+            currentRunoutAt: runoutAt,
+            observedAt: observedAt,
+            hasProjectedRunout: freshProjectionObservedAt != nil
+        )
+        return CodexRunwaySnapshotRequest(
+            baseline: baseline,
+            identities: HUDRunwayIdentityReducer.identities(from: activeRows, source: .codex),
+            now: now,
+            maxRows: maxRows
+        )
+    }
+
+    static func claudeRequest(activeRows: [HUDRow],
+                              projectedRunoutEnabled: Bool,
+                              claudeAgentEnabled: Bool,
+                              claudeUsageEnabled: Bool,
+                              fiveHourRemainingPercent: Int,
+                              fiveHourResetText: String,
+                              fiveHourProjectedRunoutAt: Date?,
+                              fiveHourProjectionObservedAt: Date?,
+                              now: Date,
+                              maxRows: Int,
+                              forceVisible: Bool = false) -> CodexRunwaySnapshotRequest? {
+        guard claudeAgentEnabled,
+              claudeUsageEnabled,
+              forceVisible || fiveHourRemainingPercent > 0,
+              let resetAt = UsageResetText.resetDate(
+                kind: "5h",
+                source: .claude,
+                raw: fiveHourResetText,
+                now: now
+              ) else {
+            return nil
+        }
+        let freshProjectionObservedAt: Date? = {
+            guard projectedRunoutEnabled,
+                  let observedAt = fiveHourProjectionObservedAt,
+                  now.timeIntervalSince(observedAt) <= 3 * 60 else {
+                return nil
+            }
+            return observedAt
+        }()
+        let observedAt = freshProjectionObservedAt ?? now
+        let runoutAt = freshProjectionObservedAt.flatMap { _ in fiveHourProjectedRunoutAt } ?? resetAt
+        guard resetAt > observedAt,
+              runoutAt > observedAt else {
+            return nil
+        }
+
+        let baseline = RunwayProviderBaseline(
+            source: .claude,
+            remainingPercent: Double(fiveHourRemainingPercent),
+            resetAt: resetAt,
+            currentRunoutAt: runoutAt,
+            observedAt: observedAt,
+            hasProjectedRunout: freshProjectionObservedAt != nil
+        )
+        return CodexRunwaySnapshotRequest(
+            baseline: baseline,
+            identities: HUDRunwayIdentityReducer.identities(from: activeRows, source: .claude),
+            now: now,
+            maxRows: maxRows,
+            recentSessionsRoot: ClaudeRunwayRecentSessionScanner.defaultRoot()
+        )
+    }
+}
+
 private struct HUDLimitsBar: View {
+    let activeRows: [HUDRow]
     @EnvironmentObject private var codexUsageModel: CodexUsageModel
     @EnvironmentObject private var claudeUsageModel: ClaudeUsageModel
     @AppStorage(PreferencesKey.codexUsageEnabled) private var codexUsageEnabled = false
@@ -3180,21 +3576,48 @@ private struct HUDLimitsBar: View {
     @AppStorage(PreferencesKey.Agents.codexEnabled) private var codexAgentEnabled = true
     @AppStorage(PreferencesKey.Agents.claudeEnabled) private var claudeAgentEnabled = true
     @AppStorage(PreferencesKey.usageDisplayMode) private var usageDisplayModeRaw = UsageDisplayMode.left.rawValue
+    @AppStorage(PreferencesKey.usageLimitCockpitProjectionEnabled) private var projectedRunoutEnabled = true
+    @AppStorage(PreferencesKey.quotaMeterRunwayVisibility) private var runwayVisibilityRaw = QuotaMeterRunwayVisibility.automatic.rawValue
+    @State private var clockNow = Date()
     @State private var isHovering = false
+    @State private var isHoveringExpandedPanel = false
     @State private var activeVariant: Int = 0
+    @State private var codexRunwaySnapshot: CodexRunwaySnapshot?
+    @State private var claudeRunwaySnapshot: CodexRunwaySnapshot?
+    @State private var expansionDirection: HUDExpansionDirection = .up
 
     private var mode: UsageDisplayMode { UsageDisplayMode(rawValue: usageDisplayModeRaw) ?? .left }
-
-    private var hasConstrainedIndicator: Bool {
-        entries.contains { $0.fiveHourLeft < 30 || $0.weekLeft < 30 }
+    private var runwayVisibility: QuotaMeterRunwayVisibility {
+        QuotaMeterRunwayVisibility.current(raw: runwayVisibilityRaw)
     }
 
     private var autoExpandNeeded: Bool {
-        activeVariant > 1 && hasConstrainedIndicator
+        activeVariant >= 3 || (activeVariant == 2 && hasActiveProjection)
+    }
+
+    private var visibleCodexRunwaySnapshot: CodexRunwaySnapshot? {
+        quotaMeterVisibleRunwaySnapshot(from: codexRunwaySnapshot, visibility: runwayVisibility)
+    }
+
+    private var visibleClaudeRunwaySnapshot: CodexRunwaySnapshot? {
+        quotaMeterVisibleRunwaySnapshot(from: claudeRunwaySnapshot, visibility: runwayVisibility)
+    }
+
+    private var hasActiveProjection: Bool {
+        guard projectedRunoutEnabled else { return false }
+        return entries.contains { entry in
+            formatUsageProjectionLabel(
+                runoutAt: entry.fiveHourProjectedRunoutAt,
+                observedAt: entry.fiveHourProjectionObservedAt,
+                now: clockNow
+            ) != nil
+        }
     }
 
     private var contentRefreshID: String {
         var parts: [String] = [mode.rawValue]
+        parts.append(projectedRunoutEnabled ? "projection-on" : "projection-off")
+        parts.append("runway-\(runwayVisibility.rawValue)")
         if codexAgentEnabled && codexUsageEnabled {
             parts.append(
                 [
@@ -3205,6 +3628,8 @@ private struct HUDLimitsBar: View {
                     codexUsageModel.weekResetText,
                     codexUsageModel.lastEventTimestamp?.timeIntervalSinceReferenceDate.description ?? "nil",
                     codexUsageModel.lastUpdate?.timeIntervalSinceReferenceDate.description ?? "nil",
+                    codexUsageModel.fiveHourProjectedRunoutAt?.timeIntervalSinceReferenceDate.description ?? "nil",
+                    codexUsageModel.fiveHourProjectionObservedAt?.timeIntervalSinceReferenceDate.description ?? "nil",
                     codexUsageModel.isUpdating ? "updating" : "idle"
                 ].joined(separator: "|")
             )
@@ -3218,12 +3643,16 @@ private struct HUDLimitsBar: View {
                     String(claudeUsageModel.weekAllModelsRemainingPercent),
                     claudeUsageModel.weekAllModelsResetText,
                     claudeUsageModel.lastUpdate?.timeIntervalSinceReferenceDate.description ?? "nil",
+                    claudeUsageModel.fiveHourProjectedRunoutAt?.timeIntervalSinceReferenceDate.description ?? "nil",
+                    claudeUsageModel.fiveHourProjectionObservedAt?.timeIntervalSinceReferenceDate.description ?? "nil",
                     claudeUsageModel.isUpdating ? "updating" : "idle"
                 ].joined(separator: "|")
             )
         }
+        parts.append(activeRows.map {
+            "\($0.id)|\($0.displayName)|\($0.parentSessionID ?? "")|\($0.logPath ?? "")"
+        }.joined(separator: ","))
         parts.append(isHovering ? "hover" : "rest")
-        parts.append(autoExpandNeeded ? "autoExpand" : "normal")
         return parts.joined(separator: "||")
     }
 
@@ -3237,7 +3666,9 @@ private struct HUDLimitsBar: View {
                 fiveHourResetText: codexUsageModel.fiveHourResetText,
                 weekResetText: codexUsageModel.weekResetText,
                 isInitialLoading: codexUsageModel.isUpdating && codexUsageModel.lastSuccessAt == nil,
-                lastDataTimestamp: codexUsageModel.lastEventTimestamp
+                lastDataTimestamp: codexUsageModel.lastEventTimestamp,
+                fiveHourProjectedRunoutAt: codexUsageModel.fiveHourProjectedRunoutAt,
+                fiveHourProjectionObservedAt: codexUsageModel.fiveHourProjectionObservedAt
             ))
         }
         if claudeAgentEnabled && claudeUsageEnabled {
@@ -3248,7 +3679,9 @@ private struct HUDLimitsBar: View {
                 fiveHourResetText: claudeUsageModel.sessionResetText,
                 weekResetText: claudeUsageModel.weekAllModelsResetText,
                 isInitialLoading: claudeUsageModel.isUpdating && claudeUsageModel.lastSuccessAt == nil,
-                lastDataTimestamp: claudeUsageModel.lastUpdate
+                lastDataTimestamp: claudeUsageModel.lastUpdate,
+                fiveHourProjectedRunoutAt: claudeUsageModel.fiveHourProjectedRunoutAt,
+                fiveHourProjectionObservedAt: claudeUsageModel.fiveHourProjectionObservedAt
             ))
         }
         return out
@@ -3262,13 +3695,20 @@ private struct HUDLimitsBar: View {
                 Rectangle()
                     .fill(Color.primary.opacity(0.10))
                     .frame(height: 0.5)
-                HUDLimitsBarContent(entries: entries, mode: mode)
+                HUDLimitsBarContent(entries: entries, mode: mode, now: clockNow)
                     .id(contentRefreshID)
                     .frame(height: 22)
                     .clipped()
                     .onPreferenceChange(LimitsBarVariantKey.self) { activeVariant = $0 }
             }
             .onHover { isHovering = $0 }
+            .background(
+                HUDWindowExpansionDirectionReader { direction in
+                    expansionDirection = direction
+                }
+                .allowsHitTesting(false)
+            )
+            .onReceive(Self.clockTimer) { clockNow = $0 }
             .onTapGesture(count: 2) {
                 if codexAgentEnabled && codexUsageEnabled && !codexUsageModel.isUpdating {
                     codexUsageModel.hardProbeNow { _ in }
@@ -3278,20 +3718,130 @@ private struct HUDLimitsBar: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                if isHovering || autoExpandNeeded {
-                    HUDLimitsDetailPanel(entries: entries, mode: mode)
-                        .id(contentRefreshID)
-                        .frame(maxWidth: .infinity)
+                if shouldShowExpandedPanel && expansionDirection == .up {
+                    expandedPanel
                         .alignmentGuide(.bottom) { d in d[.bottom] + 22.5 }
-                        .allowsHitTesting(false)
-                        .transition(.opacity.animation(.easeIn(duration: 0.05)))
                 }
             }
+            .overlay(alignment: .top) {
+                if shouldShowExpandedPanel && expansionDirection == .down {
+                    expandedPanel
+                        .alignmentGuide(.top) { d in d[.top] - 22.5 }
+                }
+            }
+            .task(id: runwayRequestID) {
+                await refreshRunwaySnapshot()
+            }
         }
+    }
+
+    private static let clockTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+
+    private var shouldShowExpandedPanel: Bool {
+        isHovering || isHoveringExpandedPanel || autoExpandNeeded
+    }
+
+    private var expandedPanel: some View {
+        HUDLimitsExpandedPanel(
+            entries: entries,
+            mode: mode,
+            now: clockNow,
+            codexRunwaySnapshot: visibleCodexRunwaySnapshot,
+            claudeRunwaySnapshot: visibleClaudeRunwaySnapshot,
+            forceEmptyDrawer: runwayVisibility == .alwaysOn
+        )
+        .id(contentRefreshID)
+        .frame(maxWidth: .infinity)
+        .onHover { hovering in
+            isHoveringExpandedPanel = hovering
+        }
+        .transition(.opacity.animation(.easeIn(duration: 0.05)))
+    }
+
+    private var runwayRequestID: String {
+        "\(codexRunwayRequest?.id ?? "codex-off")||\(claudeRunwayRequest?.id ?? "claude-off")"
+    }
+
+    private var codexRunwayRequest: CodexRunwaySnapshotRequest? {
+        return Self.runwayRequest(
+            activeRows: activeRows,
+            projectedRunoutEnabled: projectedRunoutEnabled,
+            codexAgentEnabled: codexAgentEnabled,
+            codexUsageEnabled: codexUsageEnabled,
+            fiveHourRemainingPercent: codexUsageModel.fiveHourRemainingPercent,
+            fiveHourResetText: codexUsageModel.fiveHourResetText,
+            fiveHourProjectedRunoutAt: codexUsageModel.fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: codexUsageModel.fiveHourProjectionObservedAt,
+            now: clockNow,
+            maxRows: 4,
+            forceVisible: runwayVisibility == .alwaysOn
+        )
+    }
+
+    private var claudeRunwayRequest: CodexRunwaySnapshotRequest? {
+        return HUDRunwayRequestBuilder.claudeRequest(
+            activeRows: activeRows,
+            projectedRunoutEnabled: projectedRunoutEnabled,
+            claudeAgentEnabled: claudeAgentEnabled,
+            claudeUsageEnabled: claudeUsageEnabled,
+            fiveHourRemainingPercent: claudeUsageModel.sessionRemainingPercent,
+            fiveHourResetText: claudeUsageModel.sessionResetText,
+            fiveHourProjectedRunoutAt: claudeUsageModel.fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: claudeUsageModel.fiveHourProjectionObservedAt,
+            now: clockNow,
+            maxRows: 4,
+            forceVisible: runwayVisibility == .alwaysOn
+        )
+    }
+
+    private func refreshRunwaySnapshot() async {
+        if let request = codexRunwayRequest {
+            let snapshot = await CodexRunwaySnapshotLoader.snapshot(for: request)
+            if !Task.isCancelled { codexRunwaySnapshot = snapshot }
+        } else {
+            codexRunwaySnapshot = nil
+        }
+        if let request = claudeRunwayRequest {
+            let snapshot = await ClaudeRunwaySnapshotLoader.snapshot(for: request)
+            if !Task.isCancelled { claudeRunwaySnapshot = snapshot }
+        } else {
+            claudeRunwaySnapshot = nil
+        }
+    }
+
+    static func runwayRequest(activeRows: [HUDRow],
+                              projectedRunoutEnabled: Bool,
+                              codexAgentEnabled: Bool,
+                              codexUsageEnabled: Bool,
+                              fiveHourRemainingPercent: Int,
+                              fiveHourResetText: String,
+                              fiveHourProjectedRunoutAt: Date?,
+                              fiveHourProjectionObservedAt: Date?,
+                              now: Date,
+                              maxRows: Int,
+                              forceVisible: Bool = false) -> CodexRunwaySnapshotRequest? {
+        HUDRunwayRequestBuilder.request(
+            activeRows: activeRows,
+            projectedRunoutEnabled: projectedRunoutEnabled,
+            codexAgentEnabled: codexAgentEnabled,
+            codexUsageEnabled: codexUsageEnabled,
+            fiveHourRemainingPercent: fiveHourRemainingPercent,
+            fiveHourResetText: fiveHourResetText,
+            fiveHourProjectedRunoutAt: fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: fiveHourProjectionObservedAt,
+            now: now,
+            maxRows: maxRows,
+            forceVisible: forceVisible
+        )
+    }
+
+    static func runwayIdentities(from rows: [HUDRow]) -> [RunwaySessionIdentity] {
+        HUDRunwayIdentityReducer.identities(from: rows)
     }
 }
 
 private struct HUDLimitsRowsPanel: View {
+    let activeRows: [HUDRow]
     @EnvironmentObject private var codexUsageModel: CodexUsageModel
     @EnvironmentObject private var claudeUsageModel: ClaudeUsageModel
     @AppStorage(PreferencesKey.codexUsageEnabled) private var codexUsageEnabled = false
@@ -3299,8 +3849,22 @@ private struct HUDLimitsRowsPanel: View {
     @AppStorage(PreferencesKey.Agents.codexEnabled) private var codexAgentEnabled = true
     @AppStorage(PreferencesKey.Agents.claudeEnabled) private var claudeAgentEnabled = true
     @AppStorage(PreferencesKey.usageDisplayMode) private var usageDisplayModeRaw = UsageDisplayMode.left.rawValue
+    @AppStorage(PreferencesKey.usageLimitCockpitProjectionEnabled) private var projectedRunoutEnabled = true
+    @AppStorage(PreferencesKey.quotaMeterRunwayVisibility) private var runwayVisibilityRaw = QuotaMeterRunwayVisibility.automatic.rawValue
+    @State private var clockNow = Date()
+    @State private var codexRunwaySnapshot: CodexRunwaySnapshot?
+    @State private var claudeRunwaySnapshot: CodexRunwaySnapshot?
+    @State private var isHovering = false
 
     private var mode: UsageDisplayMode { UsageDisplayMode(rawValue: usageDisplayModeRaw) ?? .left }
+    private var runwayVisibility: QuotaMeterRunwayVisibility {
+        QuotaMeterRunwayVisibility.current(raw: runwayVisibilityRaw)
+    }
+
+    private func visibleRunwaySnapshot(for source: UsageTrackingSource) -> CodexRunwaySnapshot? {
+        let snapshot = source == .claude ? claudeRunwaySnapshot : codexRunwaySnapshot
+        return quotaMeterVisibleRunwaySnapshot(from: snapshot, visibility: runwayVisibility)
+    }
 
     private var entries: [HUDLimitsProviderEntry] {
         var out: [HUDLimitsProviderEntry] = []
@@ -3312,7 +3876,9 @@ private struct HUDLimitsRowsPanel: View {
                 fiveHourResetText: codexUsageModel.fiveHourResetText,
                 weekResetText: codexUsageModel.weekResetText,
                 isInitialLoading: codexUsageModel.isUpdating && codexUsageModel.lastSuccessAt == nil,
-                lastDataTimestamp: codexUsageModel.lastEventTimestamp
+                lastDataTimestamp: codexUsageModel.lastEventTimestamp,
+                fiveHourProjectedRunoutAt: codexUsageModel.fiveHourProjectedRunoutAt,
+                fiveHourProjectionObservedAt: codexUsageModel.fiveHourProjectionObservedAt
             ))
         }
         if claudeAgentEnabled && claudeUsageEnabled {
@@ -3323,7 +3889,9 @@ private struct HUDLimitsRowsPanel: View {
                 fiveHourResetText: claudeUsageModel.sessionResetText,
                 weekResetText: claudeUsageModel.weekAllModelsResetText,
                 isInitialLoading: claudeUsageModel.isUpdating && claudeUsageModel.lastSuccessAt == nil,
-                lastDataTimestamp: claudeUsageModel.lastUpdate
+                lastDataTimestamp: claudeUsageModel.lastUpdate,
+                fiveHourProjectedRunoutAt: claudeUsageModel.fiveHourProjectedRunoutAt,
+                fiveHourProjectionObservedAt: claudeUsageModel.fiveHourProjectionObservedAt
             ))
         }
         return out
@@ -3343,12 +3911,20 @@ private struct HUDLimitsRowsPanel: View {
                                 .padding(.horizontal, 14)
                         }
                         row(entry: entry)
+                        runwayBlock(for: entry.source)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity)
-        .background(Color.primary.opacity(0.025))
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: LimitsContentHeightKey.self, value: proxy.size.height)
+            }
+        )
+        .onHover { isHovering = $0 }
+        .onReceive(Self.clockTimer) { clockNow = $0 }
         .onTapGesture(count: 2) {
             if codexAgentEnabled && codexUsageEnabled && !codexUsageModel.isUpdating {
                 codexUsageModel.hardProbeNow { _ in }
@@ -3357,22 +3933,41 @@ private struct HUDLimitsRowsPanel: View {
                 claudeUsageModel.hardProbeNowDiagnostics { _ in }
             }
         }
+        .task(id: runwayRequestID) {
+            await refreshRunwaySnapshot()
+        }
     }
 
     private func row(entry: HUDLimitsProviderEntry) -> some View {
         HStack(spacing: 0) {
-            ViewThatFits(in: .horizontal) {
-                HUDLimitsProviderText(entry: entry, mode: mode, showResets: true, onlyBottleneck: false)
-                    .fixedSize(horizontal: true, vertical: false)
-                HUDLimitsProviderText(entry: entry, mode: mode, showResets: false, onlyBottleneck: false)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .lineLimit(1)
+            HUDLimitsProviderText(entry: entry, mode: mode, showResets: true, onlyBottleneck: false, now: clockNow)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .allowsTightening(true)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .frame(height: 30)
     }
+
+    @ViewBuilder
+    private func runwayBlock(for source: UsageTrackingSource) -> some View {
+        if let snapshot = visibleRunwaySnapshot(for: source) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.5)
+                .padding(.horizontal, 14)
+            HUDRunwayPanel(snapshot: snapshot, now: clockNow, agentLabel: source == .claude ? "Claude" : "Codex")
+        } else if runwayVisibility == .alwaysOn {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.5)
+                .padding(.horizontal, 14)
+            HUDRunwayEmptyPanel(agentLabel: source == .claude ? "Claude" : "Codex")
+        }
+    }
+
+    private static let clockTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private var emptyRow: some View {
         HStack(spacing: 8) {
@@ -3387,42 +3982,228 @@ private struct HUDLimitsRowsPanel: View {
         .padding(.horizontal, 14)
         .frame(height: 30)
     }
+
+    private var runwayRequestID: String {
+        "\(codexRunwayRequest?.id ?? "codex-off")||\(claudeRunwayRequest?.id ?? "claude-off")"
+    }
+
+    private var codexRunwayRequest: CodexRunwaySnapshotRequest? {
+        return HUDLimitsBar.runwayRequest(
+            activeRows: activeRows,
+            projectedRunoutEnabled: projectedRunoutEnabled,
+            codexAgentEnabled: codexAgentEnabled,
+            codexUsageEnabled: codexUsageEnabled,
+            fiveHourRemainingPercent: codexUsageModel.fiveHourRemainingPercent,
+            fiveHourResetText: codexUsageModel.fiveHourResetText,
+            fiveHourProjectedRunoutAt: codexUsageModel.fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: codexUsageModel.fiveHourProjectionObservedAt,
+            now: clockNow,
+            maxRows: 4,
+            forceVisible: runwayVisibility == .alwaysOn
+        )
+    }
+
+    private var claudeRunwayRequest: CodexRunwaySnapshotRequest? {
+        return HUDRunwayRequestBuilder.claudeRequest(
+            activeRows: activeRows,
+            projectedRunoutEnabled: projectedRunoutEnabled,
+            claudeAgentEnabled: claudeAgentEnabled,
+            claudeUsageEnabled: claudeUsageEnabled,
+            fiveHourRemainingPercent: claudeUsageModel.sessionRemainingPercent,
+            fiveHourResetText: claudeUsageModel.sessionResetText,
+            fiveHourProjectedRunoutAt: claudeUsageModel.fiveHourProjectedRunoutAt,
+            fiveHourProjectionObservedAt: claudeUsageModel.fiveHourProjectionObservedAt,
+            now: clockNow,
+            maxRows: 4,
+            forceVisible: runwayVisibility == .alwaysOn
+        )
+    }
+
+    private func refreshRunwaySnapshot() async {
+        if let request = codexRunwayRequest {
+            let snapshot = await CodexRunwaySnapshotLoader.snapshot(for: request)
+            if !Task.isCancelled { codexRunwaySnapshot = snapshot }
+        } else {
+            codexRunwaySnapshot = nil
+        }
+        if let request = claudeRunwayRequest {
+            let snapshot = await ClaudeRunwaySnapshotLoader.snapshot(for: request)
+            if !Task.isCancelled { claudeRunwaySnapshot = snapshot }
+        } else {
+            claudeRunwaySnapshot = nil
+        }
+    }
+}
+
+private struct HUDLimitsExpandedPanel: View {
+    let entries: [HUDLimitsProviderEntry]
+    let mode: UsageDisplayMode
+    let now: Date
+    let codexRunwaySnapshot: CodexRunwaySnapshot?
+    let claudeRunwaySnapshot: CodexRunwaySnapshot?
+    var forceEmptyDrawer: Bool = false
+
+    var body: some View {
+        HUDLimitsDetailPanel(
+            entries: entries,
+            mode: mode,
+            now: now,
+            codexRunwaySnapshot: codexRunwaySnapshot,
+            claudeRunwaySnapshot: claudeRunwaySnapshot,
+            forceEmptyDrawer: forceEmptyDrawer
+        )
+    }
+}
+
+private struct HUDRunwayVisibilityPopover: View {
+    @Binding var runwayVisibilityRaw: String
+
+    private var selection: QuotaMeterRunwayVisibility {
+        QuotaMeterRunwayVisibility.current(raw: runwayVisibilityRaw)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Runway drawer")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .kerning(0.4)
+
+            Picker("", selection: Binding(
+                get: { runwayVisibilityRaw },
+                set: { runwayVisibilityRaw = $0 }
+            )) {
+                ForEach(QuotaMeterRunwayVisibility.allCases) { visibility in
+                    Text(visibility.shortLabel).tag(visibility.rawValue)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Text(selection.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(width: 236)
+    }
+}
+
+private struct HUDCockpitModePopover: View {
+    let selectedRaw: String
+    let onSelect: (AgentCockpitHUDDisplayMode) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Cockpit view")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .kerning(0.4)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+
+            ForEach(AgentCockpitHUDDisplayMode.allCases) { mode in
+                let isSelected = mode.rawValue == selectedRaw
+                Button {
+                    onSelect(mode)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: mode.systemImage)
+                            .font(.system(size: 12, weight: .medium))
+                            .frame(width: 18)
+                        Text(mode.title)
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer(minLength: 12)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .opacity(isSelected ? 1 : 0)
+                    }
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(8)
+        .frame(width: 200)
+    }
 }
 
 private struct HUDLimitsDetailPanel: View {
     let entries: [HUDLimitsProviderEntry]
     let mode: UsageDisplayMode
+    let now: Date
+    var codexRunwaySnapshot: CodexRunwaySnapshot? = nil
+    var claudeRunwaySnapshot: CodexRunwaySnapshot? = nil
+    var forceEmptyDrawer: Bool = false
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(PreferencesKey.usageLimitCockpitProjectionEnabled) private var projectedRunoutEnabled = true
+
+    private var shouldReserveFiveHourProjectionSlot: Bool {
+        guard projectedRunoutEnabled else { return false }
+        return entries.contains { entry in
+            formatUsageProjectionLabel(
+                runoutAt: entry.fiveHourProjectedRunoutAt,
+                observedAt: entry.fiveHourProjectionObservedAt,
+                now: now
+            ) != nil
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             Rectangle()
                 .fill(Color.primary.opacity(0.10))
                 .frame(height: 0.5)
-            // Grid aligns columns across rows so "Wk:" always starts at the same x position.
-            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 0) {
-                ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
-                    if index > 0 {
-                        GridRow {
-                            Rectangle()
-                                .fill(Color.primary.opacity(0.06))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 0.5)
-                                .gridCellColumns(6)
-                        }
-                    }
-                    detailRow(entry: entry)
+            ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                if index > 0 {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 0.5)
+                        .padding(.horizontal, 10)
                 }
+                // Grid keeps the "5h:" / "Wk:" columns aligned within a provider row.
+                Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 0) {
+                    detailRow(entry: entry, reserveProjectionSlot: shouldReserveFiveHourProjectionSlot)
+                }
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity)
+                runwayBlock(for: entry.source)
             }
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity)
         }
         .background(.regularMaterial)
         .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: -3)
     }
 
     @ViewBuilder
-    private func detailRow(entry: HUDLimitsProviderEntry) -> some View {
+    private func runwayBlock(for source: UsageTrackingSource) -> some View {
+        let snapshot = source == .claude ? claudeRunwaySnapshot : codexRunwaySnapshot
+        if let snapshot {
+            HUDRunwayPanel(snapshot: snapshot, now: now, agentLabel: source == .claude ? "Claude" : "Codex")
+        } else if forceEmptyDrawer {
+            HUDRunwayEmptyPanel(agentLabel: source == .claude ? "Claude" : "Codex")
+        }
+    }
+
+    @ViewBuilder
+    private func detailRow(entry: HUDLimitsProviderEntry, reserveProjectionSlot: Bool) -> some View {
         let fiveUnavail = isResetInfoUnavailable(raw: entry.fiveHourResetText)
         let weekUnavail = isResetInfoUnavailable(raw: entry.weekResetText)
         GridRow {
@@ -3445,6 +4226,23 @@ private struct HUDLimitsDetailPanel: View {
                 Text("5h: ")
                 Text(fiveUnavail ? "--" : "\(mode.numericPercent(fromLeft: entry.fiveHourLeft))%")
                     .foregroundStyle(hudPctColor(entry.fiveHourLeft))
+                if projectedRunoutEnabled,
+                   let projection = formatUsageProjectionLabel(
+                        runoutAt: entry.fiveHourProjectedRunoutAt,
+                        observedAt: entry.fiveHourProjectionObservedAt,
+                        now: now
+                   ) {
+                    Text(" \(projection)")
+                        .fontWeight(.bold)
+                        .foregroundStyle(hudProjectionColor(colorScheme))
+                } else if reserveProjectionSlot {
+                    Text(" ▸18m")
+                        .fontWeight(.bold)
+                        .foregroundStyle(hudProjectionColor(colorScheme))
+                        .opacity(0)
+                        .layoutPriority(-1)
+                        .accessibilityHidden(true)
+                }
             }
             Text("↻ \(fiveResetText(entry: entry, unavailable: fiveUnavail))")
                 .foregroundStyle(.secondary)
@@ -3467,19 +4265,278 @@ private struct HUDLimitsDetailPanel: View {
     private func fiveResetText(entry: HUDLimitsProviderEntry, unavailable: Bool) -> String {
         if unavailable { return UsageStaleThresholds.unavailableCopy }
         return formatUsageRelativeTimeLabel(
-            UsageResetText.resetDate(kind: "5h", source: entry.source, raw: entry.fiveHourResetText)
+            UsageResetText.resetDate(kind: "5h", source: entry.source, raw: entry.fiveHourResetText, now: now),
+            now: now
         ) ?? "—"
     }
 
     private func weekResetText(entry: HUDLimitsProviderEntry, unavailable: Bool) -> String {
         if unavailable { return UsageStaleThresholds.unavailableCopy }
         return formatUsageWeeklyResetLabel(
-            UsageResetText.resetDate(kind: "Wk", source: entry.source, raw: entry.weekResetText)
+            UsageResetText.resetDate(kind: "Wk", source: entry.source, raw: entry.weekResetText, now: now),
+            now: now
         ) ?? "—"
     }
 }
 
-/// Reports which ViewThatFits variant the HUD limits bar chose (1 = full, 2 = no resets, 3 = bottleneck).
+private struct HUDRunwayPanel: View {
+    let snapshot: CodexRunwaySnapshot
+    let now: Date
+    var agentLabel: String = "Codex"
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var animationTick: Int = 0
+
+    private static let loadTimer = Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()
+
+    private var maxQuotaMinutesPerHour: Double {
+        let rowMax = snapshot.rows.map(\.quotaMinutesPerHour).max() ?? 0
+        let summaryMax = snapshot.burstSummary?.quotaMinutesPerHour ?? 0
+        return max(1, rowMax, summaryMax)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                if snapshot.hasRunwayContent {
+                    ForEach(Array(snapshot.rows.enumerated()), id: \.element.id) { index, row in
+                        runwayRow(row, index: index)
+                        .help(rowHelp(row))
+                    }
+                    if let summary = snapshot.burstSummary {
+                        summaryRow(summary)
+                        .help(summaryHelp(summary))
+                    }
+                } else {
+                    Text("No active \(agentLabel) burn")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                        .frame(height: HUDRunwayLayout.rowHeight, alignment: .center)
+                }
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+        }
+        .foregroundStyle(Color.primary)
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.5)
+        }
+        .onReceive(Self.loadTimer) { _ in
+            animationTick = (animationTick + 1) % 1024
+        }
+    }
+
+    /// Burn-rate cell: a small spinner while the rate is still being measured
+    /// (waiting), otherwise the quota-rate text.
+    @ViewBuilder
+    private func rateCell(quota: Double, confidence: RunwayAttributionConfidence) -> some View {
+        if confidence == .waiting {
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.62)
+                .frame(width: 22, height: 12, alignment: .trailing)
+        } else {
+            Text(RunwayTimeFormatting.quotaRate(quota, confidence: confidence))
+                .foregroundStyle(quota > 0 ? hudProjectionColor(colorScheme) : .secondary)
+        }
+    }
+
+    private func runwayRow(_ row: RunwayPauseImpactRow, index: Int) -> some View {
+        GeometryReader { proxy in
+            let titleWidth = HUDRunwayLayout.titleWidth(for: proxy.size.width)
+            HStack(spacing: HUDRunwayLayout.columnSpacing) {
+                Text(sessionLabel(row))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: titleWidth, alignment: .leading)
+                rateCell(quota: row.quotaMinutesPerHour, confidence: row.confidence)
+                    .frame(width: HUDRunwayLayout.rateWidth, alignment: .trailing)
+                HUDRunwayLoadBar(
+                    quotaMinutesPerHour: row.quotaMinutesPerHour,
+                    maxQuotaMinutesPerHour: maxQuotaMinutesPerHour,
+                    confidence: row.confidence,
+                    animationTick: animationTick,
+                    index: index
+                )
+            }
+        }
+        .frame(height: HUDRunwayLayout.rowHeight)
+    }
+
+    private func summaryRow(_ summary: RunwayShortBurstSummary) -> some View {
+        let confidence: RunwayAttributionConfidence = summary.quotaMinutesPerHour > 0 ? .mixed : .waiting
+        return GeometryReader { proxy in
+            let titleWidth = HUDRunwayLayout.titleWidth(for: proxy.size.width)
+            HStack(spacing: HUDRunwayLayout.columnSpacing) {
+                Text(summaryLabel(summary))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: titleWidth, alignment: .leading)
+                rateCell(quota: summary.quotaMinutesPerHour, confidence: confidence)
+                    .frame(width: HUDRunwayLayout.rateWidth, alignment: .trailing)
+                HUDRunwayLoadBar(
+                    quotaMinutesPerHour: summary.quotaMinutesPerHour,
+                    maxQuotaMinutesPerHour: maxQuotaMinutesPerHour,
+                    confidence: confidence,
+                    animationTick: animationTick,
+                    index: snapshot.rows.count
+                )
+            }
+        }
+        .frame(height: HUDRunwayLayout.rowHeight)
+    }
+
+    private func sessionLabel(_ row: RunwayPauseImpactRow) -> String {
+        row.isGoal ? "GOAL \(row.displayName)" : row.displayName
+    }
+
+    private func rowHelp(_ row: RunwayPauseImpactRow) -> String {
+        if row.confidence == .waiting {
+            return "Burn rate is calculating for this active session."
+        }
+        return "Pausing this session is estimated to add \(RunwayTimeFormatting.gain(row.gainedSeconds)) of 5h runway."
+    }
+
+    private func summaryLabel(_ summary: RunwayShortBurstSummary) -> String {
+        summary.quotaMinutesPerHour > 0 ? "+\(summary.count) bursts" : "+\(summary.count) sessions"
+    }
+
+    private func summaryHelp(_ summary: RunwayShortBurstSummary) -> String {
+        if summary.quotaMinutesPerHour <= 0 {
+            return "Burn rate is calculating for these active sessions."
+        }
+        return "Combined short-session burn. Pausing them is estimated to add \(RunwayTimeFormatting.gain(summary.gainedSeconds)) of 5h runway."
+    }
+}
+
+/// Placeholder drawer shown when the runway is forced visible ("Always On")
+/// but there is no burn data to display for the agent.
+private struct HUDRunwayEmptyPanel: View {
+    var agentLabel: String = "Codex"
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text("No active \(agentLabel) burn")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.5)
+        }
+    }
+}
+
+private struct HUDRunwayLoadBar: View {
+    let quotaMinutesPerHour: Double
+    let maxQuotaMinutesPerHour: Double
+    let confidence: RunwayAttributionConfidence
+    let animationTick: Int
+    let index: Int
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fillFraction: CGFloat {
+        guard quotaMinutesPerHour.isFinite,
+              quotaMinutesPerHour >= 0,
+              maxQuotaMinutesPerHour.isFinite,
+              maxQuotaMinutesPerHour > 0 else {
+            return 0
+        }
+        let relative = quotaMinutesPerHour / maxQuotaMinutesPerHour
+        let absolutePressure = min(1, quotaMinutesPerHour / 45)
+        let base = max(0.12, (relative * 0.60) + (absolutePressure * 0.30))
+        let wave = 0.82 + 0.18 * sin(Double(animationTick + index * 3) * 0.9)
+        return CGFloat(min(1, max(0.04, base * wave)))
+    }
+
+    private var fillOpacity: Double {
+        switch confidence {
+        case .waiting:
+            return 0.38
+        case .unsupported:
+            return 0
+        case .direct, .mixed:
+            return 0.82
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.08))
+                // While waiting the spinner carries the "working" cue, so the
+                // bar stays an empty track until a real rate arrives.
+                if confidence != .waiting {
+                    Capsule()
+                        .fill(hudProjectionColor(colorScheme).opacity(fillOpacity))
+                        .frame(width: max(0, proxy.size.width * fillFraction))
+                        .animation(.easeInOut(duration: 0.28), value: animationTick)
+                }
+            }
+        }
+        .frame(minWidth: 62, maxWidth: .infinity)
+        .frame(height: 5)
+        .accessibilityLabel(RunwayTimeFormatting.quotaRate(quotaMinutesPerHour, confidence: confidence))
+    }
+}
+
+private enum HUDRunwayLayout {
+    static let titleFraction: CGFloat = 2.0 / 3.0
+    static let rateWidth: CGFloat = 42
+    static let minBarWidth: CGFloat = 62
+    static let columnSpacing: CGFloat = 8
+    static let rowHeight: CGFloat = 14
+
+    static func titleWidth(for totalWidth: CGFloat) -> CGFloat {
+        let reservedWidth = rateWidth + minBarWidth + (columnSpacing * 2)
+        let maximumTitleWidth = max(64, totalWidth - reservedWidth)
+        return min(maximumTitleWidth, max(64, totalWidth * titleFraction))
+    }
+}
+
+private enum RunwayTimeFormatting {
+    static let minimumVisibleGain: TimeInterval = 60
+
+    static func quotaRate(_ minutesPerHour: Double, confidence: RunwayAttributionConfidence = .mixed) -> String {
+        guard confidence != .waiting else { return "calc" }
+        guard minutesPerHour.isFinite, minutesPerHour >= 0.5 else { return "flat" }
+        let rounded = Int(ceil(minutesPerHour))
+        return "\(rounded)m/h"
+    }
+
+    static func gain(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite, seconds >= minimumVisibleGain else { return "-" }
+        return "+\(compactDuration(seconds))"
+    }
+
+    static func compactDuration(_ seconds: TimeInterval) -> String {
+        let minutes = max(1, Int(ceil(seconds / 60)))
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if remainder == 0 { return "\(hours)h" }
+        return "\(hours)h\(remainder)m"
+    }
+}
+
+/// Reports which ViewThatFits variant the HUD limits bar chose
+/// (1 = full resets + projection, 2 = full resets without projection,
+///  3 = bottleneck reset, 4 = no resets, 5 = bottleneck only).
 private struct LimitsBarVariantKey: PreferenceKey {
     static let defaultValue: Int = 0
     static func reduce(value: inout Int, nextValue: () -> Int) {
@@ -3495,27 +4552,40 @@ private func hudPctColor(_ left: Int) -> Color {
     return .primary
 }
 
+private func hudProjectionColor(_ colorScheme: ColorScheme) -> Color {
+    colorScheme == .dark
+        ? Color(red: 1.0, green: 0.60, blue: 0.12)
+        : Color(red: 0.82, green: 0.30, blue: 0.00)
+}
+
 private struct HUDLimitsBarContent: View {
     let entries: [HUDLimitsProviderEntry]
     let mode: UsageDisplayMode
+    let now: Date
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            // Variant 1: Full — both windows with reset times
-            entriesRow(showResets: true, onlyBottleneck: false)
+            // Variant 1: Full — both windows with reset times and projection when it fits
+            entriesRow(showResets: true, onlyBottleneck: false, showProjection: true)
                 .preference(key: LimitsBarVariantKey.self, value: 1)
-            // Variant 2: No resets — both windows, percent only
-            entriesRow(showResets: false, onlyBottleneck: false)
+            // Variant 1 fallback: keep reset times before spending width on projection
+            entriesRow(showResets: true, onlyBottleneck: false, showProjection: false)
                 .preference(key: LimitsBarVariantKey.self, value: 2)
-            // Variant 3: Bottleneck only — whichever window has fewer % left
-            entriesRow(showResets: false, onlyBottleneck: true)
+            // Variant 2: Bottleneck with reset — keep at least the limiting reset visible
+            entriesRow(showResets: true, onlyBottleneck: true, showProjection: false)
                 .preference(key: LimitsBarVariantKey.self, value: 3)
+            // Variant 3: No resets — both windows, percent only
+            entriesRow(showResets: false, onlyBottleneck: false, showProjection: false)
+                .preference(key: LimitsBarVariantKey.self, value: 4)
+            // Variant 4: Bottleneck only — whichever window has fewer % left
+            entriesRow(showResets: false, onlyBottleneck: true, showProjection: false)
+                .preference(key: LimitsBarVariantKey.self, value: 5)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
     }
 
-    @ViewBuilder private func entriesRow(showResets: Bool, onlyBottleneck: Bool) -> some View {
+    @ViewBuilder private func entriesRow(showResets: Bool, onlyBottleneck: Bool, showProjection: Bool) -> some View {
         HStack(spacing: 10) {
             ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
                 if index > 0 {
@@ -3523,7 +4593,14 @@ private struct HUDLimitsBarContent: View {
                         .foregroundStyle(Color.primary.opacity(0.25))
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
                 }
-                HUDLimitsProviderText(entry: entry, mode: mode, showResets: showResets, onlyBottleneck: onlyBottleneck)
+                HUDLimitsProviderText(
+                    entry: entry,
+                    mode: mode,
+                    showResets: showResets,
+                    onlyBottleneck: onlyBottleneck,
+                    showProjection: showProjection,
+                    now: now
+                )
             }
         }
         .lineLimit(1)
@@ -3536,7 +4613,10 @@ private struct HUDLimitsProviderText: View {
     let mode: UsageDisplayMode
     var showResets: Bool = true
     var onlyBottleneck: Bool = false
+    var showProjection: Bool = true
+    var now: Date = Date()
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(PreferencesKey.usageLimitCockpitProjectionEnabled) private var projectedRunoutEnabled = true
 
     // 5h wins ties (<=): it's the shorter window, so equally constrained favours showing the tighter limit.
     private var bottleneckIs5h: Bool { entry.fiveHourLeft <= entry.weekLeft }
@@ -3545,25 +4625,34 @@ private struct HUDLimitsProviderText: View {
 
     private func pct(_ left: Int) -> Int { mode.numericPercent(fromLeft: left) }
     private func pctLabel(_ left: Int, unavailable: Bool) -> String { unavailable ? "--" : "\(pct(left))%" }
+    private var fiveHourProjectionLabel: String? {
+        guard showProjection else { return nil }
+        guard projectedRunoutEnabled else { return nil }
+        return formatUsageProjectionLabel(
+            runoutAt: entry.fiveHourProjectedRunoutAt,
+            observedAt: entry.fiveHourProjectionObservedAt,
+            now: now
+        )
+    }
 
     private func fiveHourResetLabel() -> String? {
         if fiveUnavailable { return UsageStaleThresholds.unavailableCopy }
         let raw = entry.fiveHourResetText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return nil }
-        let date = UsageResetText.resetDate(kind: "5h", source: entry.source, raw: entry.fiveHourResetText)
-        if let relative = formatRelativeTimeUntil(date) { return relative }
-        let fallback = UsageResetText.displayText(kind: "5h", source: entry.source, raw: entry.fiveHourResetText)
-        return fallback.isEmpty ? nil : fallback
+        guard !raw.isEmpty else { return "—" }
+        let date = UsageResetText.resetDate(kind: "5h", source: entry.source, raw: entry.fiveHourResetText, now: now)
+        if let relative = formatRelativeTimeUntil(date, now: now) { return relative }
+        let fallback = UsageResetText.displayText(kind: "5h", source: entry.source, raw: entry.fiveHourResetText, now: now)
+        return fallback.isEmpty ? "—" : fallback
     }
 
     private func weekResetLabel() -> String? {
         if weekUnavailable { return UsageStaleThresholds.unavailableCopy }
         let raw = entry.weekResetText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return nil }
-        let date = UsageResetText.resetDate(kind: "Wk", source: entry.source, raw: entry.weekResetText)
-        if let weekly = formatWeeklyReset(date) { return weekly }
-        let fallback = UsageResetText.displayText(kind: "Wk", source: entry.source, raw: entry.weekResetText)
-        return fallback.isEmpty ? nil : fallback
+        guard !raw.isEmpty else { return "—" }
+        let date = UsageResetText.resetDate(kind: "Wk", source: entry.source, raw: entry.weekResetText, now: now)
+        if let weekly = formatWeeklyReset(date, now: now) { return weekly }
+        let fallback = UsageResetText.displayText(kind: "Wk", source: entry.source, raw: entry.weekResetText, now: now)
+        return fallback.isEmpty ? "—" : fallback
     }
 
     // Matches CockpitFooterView.QuotaWidget.formatRelativeTimeUntil exactly
@@ -3605,6 +4694,11 @@ private struct HUDLimitsProviderText: View {
                                 Text("5h: ")
                                 Text(pctLabel(entry.fiveHourLeft, unavailable: fiveUnavailable))
                                     .foregroundStyle(hudPctColor(entry.fiveHourLeft))
+                                if let projection = fiveHourProjectionLabel {
+                                    Text(" \(projection)")
+                                        .fontWeight(.bold)
+                                        .foregroundStyle(hudProjectionColor(colorScheme))
+                                }
                             }
                             if showResets, let r = fiveHourResetLabel() {
                                 Text("↻ \(r)")

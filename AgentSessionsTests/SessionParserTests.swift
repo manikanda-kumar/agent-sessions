@@ -2,6 +2,21 @@ import XCTest
 import SQLite3
 @testable import AgentSessions
 
+private final class SearchCoordinatorTestStore: SearchSessionStoring {
+    private(set) var parseFullCallCount = 0
+
+    func transcriptCache(for source: SessionSource) -> TranscriptCache? {
+        nil
+    }
+
+    func updateSession(_ session: Session) {}
+
+    func parseFull(session: Session) async -> Session? {
+        parseFullCallCount += 1
+        return session
+    }
+}
+
 final class SessionParserTests: XCTestCase {
     func fixtureURL(_ name: String) -> URL {
         let bundle = Bundle(for: type(of: self))
@@ -51,7 +66,9 @@ final class SessionParserTests: XCTestCase {
         timestamp: String,
         cwd: String,
         parentSessionID: String? = nil,
-        subagentType: String? = nil
+        subagentType: String? = nil,
+        relationshipKind: SessionRelationshipKind? = nil,
+        events: [SessionEvent] = []
     ) -> Session {
         Session(
             id: id,
@@ -60,14 +77,15 @@ final class SessionParserTests: XCTestCase {
             endTime: nil,
             model: nil,
             filePath: "/tmp/rollout-\(timestamp)-\(runtimeID).jsonl",
-            eventCount: 0,
-            events: [],
+            eventCount: events.count,
+            events: events,
             cwd: cwd,
             repoName: nil,
             lightweightTitle: id,
             codexInternalSessionIDHint: runtimeID,
             parentSessionID: parentSessionID,
-            subagentType: subagentType
+            subagentType: subagentType,
+            relationshipKind: relationshipKind
         )
     }
 
@@ -280,6 +298,261 @@ final class SessionParserTests: XCTestCase {
         filtered = FilterEngine.filterSessions(all, filters: filters)
         XCTAssertEqual(filtered.count, 1)
         XCTAssertEqual(filtered.first?.id, s2.id)
+    }
+
+    func testSideChatFilterOnlyShowsSideChats() throws {
+        let root = makeCodexHierarchySession(
+            id: "root",
+            runtimeID: "019ed789-0000-7000-8000-000000000001",
+            timestamp: "2026-06-18T12-00-00",
+            cwd: "/tmp/repo"
+        )
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-0000-7000-8000-000000000002",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            relationshipKind: .sideChat
+        )
+
+        let filtered = FilterEngine.filterSessions(
+            [root, sideChat],
+            filters: Filters(sideChatsOnly: true),
+            allowTranscriptGeneration: false
+        )
+
+        XCTAssertEqual(filtered.map(\.id), ["side-chat"])
+    }
+
+    func testSideSearchTagOnlyShowsSideChatsWithoutSearchingSideText() throws {
+        let root = makeCodexHierarchySession(
+            id: "root",
+            runtimeID: "019ed789-0000-7000-8000-000000000001",
+            timestamp: "2026-06-18T12-00-00",
+            cwd: "/tmp/repo"
+        )
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-0000-7000-8000-000000000002",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            relationshipKind: .sideChat
+        )
+
+        let filtered = FilterEngine.filterSessions(
+            [root, sideChat],
+            filters: Filters(query: "#side"),
+            allowTranscriptGeneration: false
+        )
+
+        XCTAssertEqual(filtered.map(\.id), ["side-chat"])
+        XCTAssertEqual(FilterEngine.parseOperators("#side").freeText, "")
+    }
+
+    func testSideSearchTagIgnoresArchivedCodexDesktopFilter() throws {
+        let root = makeCodexHierarchySession(
+            id: "root",
+            runtimeID: "019ed789-0000-7000-8000-000000000001",
+            timestamp: "2026-06-18T12-00-00",
+            cwd: "/tmp/repo"
+        )
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-0000-7000-8000-000000000002",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            relationshipKind: .sideChat
+        )
+
+        let filtered = FilterEngine.filterSessions(
+            [root, sideChat],
+            filters: Filters(query: "#side", archivedCodexDesktopOnly: true),
+            allowTranscriptGeneration: false
+        )
+
+        XCTAssertEqual(filtered.map(\.id), ["side-chat"])
+    }
+
+    func testSearchCoordinatorSideTagOnlyUsesMetadataPath() async throws {
+        let root = makeCodexHierarchySession(
+            id: "root",
+            runtimeID: "019ed789-0000-7000-8000-000000000001",
+            timestamp: "2026-06-18T12-00-00",
+            cwd: "/tmp/repo"
+        )
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-0000-7000-8000-000000000002",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            relationshipKind: .sideChat
+        )
+        let store = SearchCoordinatorTestStore()
+        let coordinator = SearchCoordinator(store: store)
+
+        coordinator.start(query: "#side",
+                          filters: Filters(query: "#side"),
+                          includeCodex: true,
+                          includeClaude: false,
+                          includeGemini: false,
+                          includeOpenCode: false,
+                          includeHermes: false,
+                          includeCopilot: false,
+                          includeDroid: false,
+                          includeOpenClaw: false,
+                          includeCursor: false,
+                          includePi: false,
+                          includeGrok: false,
+                          includeAmp: false,
+                          includeAntigravity: false,
+                          enableDeepScan: false,
+                          all: [root, sideChat])
+
+        try await waitForSearchResults(coordinator, expectedIDs: ["side-chat"])
+        XCTAssertFalse(coordinator.isRunning)
+        XCTAssertEqual(store.parseFullCallCount, 0)
+    }
+
+    func testSearchCoordinatorSideTagIgnoresArchivedCodexDesktopFilter() async throws {
+        let root = makeCodexHierarchySession(
+            id: "root",
+            runtimeID: "019ed789-0000-7000-8000-000000000001",
+            timestamp: "2026-06-18T12-00-00",
+            cwd: "/tmp/repo"
+        )
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-0000-7000-8000-000000000002",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            relationshipKind: .sideChat
+        )
+        let store = SearchCoordinatorTestStore()
+        let coordinator = SearchCoordinator(store: store)
+
+        coordinator.start(query: "#side",
+                          filters: Filters(query: "#side", archivedCodexDesktopOnly: true),
+                          includeCodex: true,
+                          includeClaude: false,
+                          includeGemini: false,
+                          includeOpenCode: false,
+                          includeHermes: false,
+                          includeCopilot: false,
+                          includeDroid: false,
+                          includeOpenClaw: false,
+                          includeCursor: false,
+                          includePi: false,
+                          includeGrok: false,
+                          includeAmp: false,
+                          includeAntigravity: false,
+                          enableDeepScan: false,
+                          all: [root, sideChat])
+
+        try await waitForSearchResults(coordinator, expectedIDs: ["side-chat"])
+        XCTAssertFalse(coordinator.isRunning)
+        XCTAssertEqual(store.parseFullCallCount, 0)
+    }
+
+    private func waitForSearchResults(_ coordinator: SearchCoordinator,
+                                      expectedIDs: [String],
+                                      file: StaticString = #filePath,
+                                      line: UInt = #line) async throws {
+        for _ in 0..<50 {
+            if coordinator.results.map(\.id) == expectedIDs {
+                return
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Timed out waiting for search results. Got \(coordinator.results.map(\.id))",
+                file: file,
+                line: line)
+    }
+
+    func testSideSearchTagCombinesWithRemainingPhrase() throws {
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-0000-7000-8000-000000000002",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            relationshipKind: .sideChat,
+            events: [
+                SessionEvent(id: "side-marker",
+                             timestamp: nil,
+                             kind: .user,
+                             role: "user",
+                             text: "ABRACADABRA side-chat note",
+                             toolName: nil,
+                             toolInput: nil,
+                             toolOutput: nil,
+                             messageID: nil,
+                             parentID: nil,
+                             isDelta: false,
+                             rawJSON: "{}")
+            ]
+        )
+        let matchingRoot = makeCodexHierarchySession(
+            id: "matching-root",
+            runtimeID: "019ed789-0000-7000-8000-000000000003",
+            timestamp: "2026-06-18T12-02-00",
+            cwd: "/tmp/repo",
+            events: [
+                SessionEvent(id: "root-marker",
+                             timestamp: nil,
+                             kind: .user,
+                             role: "user",
+                             text: "ABRACADABRA root note",
+                             toolName: nil,
+                             toolInput: nil,
+                             toolOutput: nil,
+                             messageID: nil,
+                             parentID: nil,
+                             isDelta: false,
+                             rawJSON: "{}")
+            ]
+        )
+
+        let filtered = FilterEngine.filterSessions(
+            [matchingRoot, sideChat],
+            filters: Filters(query: "#side ABRACADABRA"),
+            allowTranscriptGeneration: false
+        )
+
+        XCTAssertEqual(filtered.map(\.id), ["side-chat"])
+        XCTAssertEqual(FilterEngine.parseOperators("#side ABRACADABRA").freeText, "ABRACADABRA")
+    }
+
+    func testQuotedSideSearchTagRemainsLiteralText() throws {
+        let root = makeCodexHierarchySession(
+            id: "root",
+            runtimeID: "019ed789-0000-7000-8000-000000000001",
+            timestamp: "2026-06-18T12-01-00",
+            cwd: "/tmp/repo",
+            events: [
+                SessionEvent(id: "quoted-side",
+                             timestamp: nil,
+                             kind: .user,
+                             role: "user",
+                             text: "literal #side tag",
+                             toolName: nil,
+                             toolInput: nil,
+                             toolOutput: nil,
+                             messageID: nil,
+                             parentID: nil,
+                             isDelta: false,
+                             rawJSON: "{}")
+            ]
+        )
+
+        let parsed = FilterEngine.parseOperators("\"#side\"")
+        let filtered = FilterEngine.filterSessions(
+            [root],
+            filters: Filters(query: "\"#side\""),
+            allowTranscriptGeneration: false
+        )
+
+        XCTAssertFalse(parsed.sideChatsOnly)
+        XCTAssertEqual(parsed.freeText, "\"#side\"")
+        XCTAssertEqual(filtered.map(\.id), ["root"])
     }
 
     func testSearchMatchesLightweightSessionTitle() throws {
@@ -1391,6 +1664,61 @@ final class SessionParserTests: XCTestCase {
         XCTAssertEqual(result.sessions.map(\.id), ["review-child", "parent"])
         XCTAssertEqual(result.rowMeta["review-child"]?.depth, 0)
         XCTAssertEqual(result.rowMeta["parent"]?.hasChildren, false)
+    }
+
+    func testSubagentHierarchyDoesNotInferSideChatAsRoleOnlyParent() {
+        let cwd = "/tmp/repo"
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019ed789-2247-7ad3-9b32-00a7875ffa77",
+            timestamp: "2026-06-18T10-00-00",
+            cwd: cwd,
+            relationshipKind: .sideChat
+        )
+        let roleOnlyChild = makeCodexHierarchySession(
+            id: "review-child",
+            runtimeID: "019ed789-2247-7ad3-9b32-00a7875ffa88",
+            timestamp: "2026-06-18T10-05-00",
+            cwd: cwd,
+            subagentType: "review"
+        )
+
+        let result = SubagentHierarchyBuilder.build(
+            sessions: [roleOnlyChild, sideChat],
+            hierarchyEnabled: true
+        )
+
+        XCTAssertEqual(result.sessions.map(\.id), ["review-child", "side-chat"])
+        XCTAssertEqual(result.rowMeta["review-child"]?.depth, 0)
+        XCTAssertEqual(result.rowMeta["side-chat"]?.hasChildren, false)
+    }
+
+    func testSubagentHierarchyNestsSideChatWhenParentExists() {
+        let parentRuntimeID = "019ee839-07ff-7370-8a66-2fedf3ee3956"
+        let parent = makeCodexHierarchySession(
+            id: "parent",
+            runtimeID: parentRuntimeID,
+            timestamp: "2026-06-21T03-28-32",
+            cwd: "/tmp/repo"
+        )
+        let sideChat = makeCodexHierarchySession(
+            id: "side-chat",
+            runtimeID: "019eeb13-9ffc-7671-9481-2f2246e09b8a",
+            timestamp: "2026-06-21T09-46-32",
+            cwd: "/tmp/repo",
+            parentSessionID: parentRuntimeID,
+            relationshipKind: .sideChat
+        )
+
+        let result = SubagentHierarchyBuilder.build(
+            sessions: [sideChat, parent],
+            hierarchyEnabled: true
+        )
+
+        XCTAssertEqual(result.sessions.map(\.id), ["parent", "side-chat"])
+        XCTAssertEqual(result.rowMeta["parent"]?.hasChildren, true)
+        XCTAssertEqual(result.rowMeta["parent"]?.childCount, 1)
+        XCTAssertEqual(result.rowMeta["side-chat"]?.depth, 1)
     }
 
     func testSubagentHierarchyInfersRoleOnlyParentAfterLongGap() {
@@ -2554,35 +2882,135 @@ final class SessionParserTests: XCTestCase {
         XCTAssertFalse(found.contains(canonicalPath(noiseURL)))
     }
 
-    func testGeminiDiscoveryAcceptsNamedProjectDirectories() throws {
+    func testAntigravityDiscoveryFindsBrainArtifactsOnly() throws {
         let fm = FileManager.default
-        let root = fm.temporaryDirectory.appendingPathComponent("AgentSessions-Gemini-Discovery-\(UUID().uuidString)", isDirectory: true)
+        let root = fm.temporaryDirectory.appendingPathComponent("AgentSessions-Antigravity-Discovery-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: root) }
 
-        let namedWithChats = root.appendingPathComponent("radio4j/chats", isDirectory: true)
-        let namedWithoutChats = root.appendingPathComponent("radio-metadata-fr-scraper", isDirectory: true)
-        let noiseDir = root.appendingPathComponent("bin/chats", isDirectory: true)
-        try fm.createDirectory(at: namedWithChats, withIntermediateDirectories: true)
-        try fm.createDirectory(at: namedWithoutChats, withIntermediateDirectories: true)
-        try fm.createDirectory(at: noiseDir, withIntermediateDirectories: true)
+        let conversation = root.appendingPathComponent("conv-123", isDirectory: true)
+        let oldGeminiProject = root.appendingPathComponent("radio4j/chats", isDirectory: true)
+        try fm.createDirectory(at: conversation, withIntermediateDirectories: true)
+        try fm.createDirectory(at: oldGeminiProject, withIntermediateDirectories: true)
 
-        let chatsSession = namedWithChats.appendingPathComponent("session-1.json")
-        let chatsJSONLSession = namedWithChats.appendingPathComponent("session-1b.jsonl")
-        let rootSession = namedWithoutChats.appendingPathComponent("session-2.json")
-        let ignoredSession = noiseDir.appendingPathComponent("session-bin.json")
+        let task = conversation.appendingPathComponent("task.md")
+        let walkthrough = conversation.appendingPathComponent("walkthrough.md")
+        let oldGeminiSession = oldGeminiProject.appendingPathComponent("session-1.json")
+        let unrelatedMarkdown = conversation.appendingPathComponent("notes.md")
 
-        try writeText("{}", to: chatsSession)
-        try writeText("{}", to: chatsJSONLSession)
-        try writeText("{}", to: rootSession)
-        try writeText("{}", to: ignoredSession)
+        try writeText("# Build plan\n", to: task)
+        try writeText("# Walkthrough\n", to: walkthrough)
+        try writeText("{}", to: oldGeminiSession)
+        try writeText("# Notes\n", to: unrelatedMarkdown)
 
         let discovery = GeminiSessionDiscovery(customRoot: root.path)
         let found = Set(discovery.discoverSessionFiles().map(canonicalPath))
 
-        XCTAssertTrue(found.contains(canonicalPath(chatsSession)))
-        XCTAssertTrue(found.contains(canonicalPath(chatsJSONLSession)))
-        XCTAssertTrue(found.contains(canonicalPath(rootSession)))
-        XCTAssertFalse(found.contains(canonicalPath(ignoredSession)))
+        XCTAssertTrue(found.contains(canonicalPath(task)))
+        XCTAssertTrue(found.contains(canonicalPath(walkthrough)))
+        XCTAssertTrue(found.contains(canonicalPath(unrelatedMarkdown)))
+        XCTAssertFalse(found.contains(canonicalPath(oldGeminiSession)))
+    }
+
+    func testAntigravityMarkdownArtifactParsesConversationIDAndTitle() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("AgentSessions-Antigravity-Parser-\(UUID().uuidString)", isDirectory: true)
+        let conversation = root.appendingPathComponent("conv-abc", isDirectory: true)
+        try fm.createDirectory(at: conversation, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let url = conversation.appendingPathComponent("task.md")
+        try writeText("""
+        # Replace unsupported provider
+
+        Use agy for this conversation.
+        """, to: url)
+
+        guard let preview = GeminiSessionParser.parseFile(at: url) else { return XCTFail("preview parse returned nil") }
+        XCTAssertEqual(preview.source, .gemini)
+        XCTAssertEqual(preview.id, "conv-abc#task")
+        XCTAssertEqual(GeminiSessionIDHelper.deriveSessionID(from: preview), "conv-abc")
+        XCTAssertEqual(preview.title, "Replace unsupported provider")
+        XCTAssertEqual(preview.eventCount, 1)
+        XCTAssertTrue(preview.events.isEmpty)
+
+        guard let full = GeminiSessionParser.parseFileFull(at: url) else { return XCTFail("full parse returned nil") }
+        XCTAssertEqual(full.source, .gemini)
+        XCTAssertEqual(full.id, "conv-abc#task")
+        XCTAssertEqual(GeminiSessionIDHelper.deriveSessionID(from: full), "conv-abc")
+        XCTAssertEqual(full.events.count, 1)
+        XCTAssertEqual(full.events.first?.kind, .assistant)
+        XCTAssertTrue(full.events.first?.text?.contains("Use agy") == true)
+    }
+
+    func testAntigravityMarkdownArtifactInfersProjectFromLocalFileLink() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("AgentSessions-Antigravity-Project-\(UUID().uuidString)", isDirectory: true)
+        let brain = root.appendingPathComponent("brain/conv-project", isDirectory: true)
+        let repo = root.appendingPathComponent("ExampleProject", isDirectory: true)
+        let sourceDir = repo.appendingPathComponent("Sources", isDirectory: true)
+        try fm.createDirectory(at: brain, withIntermediateDirectories: true)
+        try fm.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: repo.appendingPathComponent(".git", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let sourceFile = sourceDir.appendingPathComponent("Feature.swift")
+        try writeText("struct Feature {}\n", to: sourceFile)
+
+        let task = brain.appendingPathComponent("task.md")
+        try writeText("""
+        # Update feature
+
+        See [Feature.swift](file://\(sourceFile.path)).
+        """, to: task)
+
+        guard let session = GeminiSessionParser.parseFile(at: task) else { return XCTFail("parse returned nil") }
+        XCTAssertEqual(session.cwd, repo.path)
+        XCTAssertEqual(session.rowRepoName, "ExampleProject")
+    }
+
+    func testAntigravityMarkdownArtifactInfersProjectFromSiblingLocalFileLink() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("AgentSessions-Antigravity-SiblingProject-\(UUID().uuidString)", isDirectory: true)
+        let brain = root.appendingPathComponent("brain/conv-project", isDirectory: true)
+        let repo = root.appendingPathComponent("SiblingProject", isDirectory: true)
+        let docsDir = repo.appendingPathComponent("docs", isDirectory: true)
+        try fm.createDirectory(at: brain, withIntermediateDirectories: true)
+        try fm.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: repo.appendingPathComponent(".git", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let doc = docsDir.appendingPathComponent("index.html")
+        try writeText("<h1>Docs</h1>\n", to: doc)
+
+        let task = brain.appendingPathComponent("task.md")
+        let walkthrough = brain.appendingPathComponent("walkthrough.md")
+        try writeText("# Task without links\n", to: task)
+        try writeText("""
+        # Walkthrough
+
+        Open `file://\(doc.path)` in the browser.
+        """, to: walkthrough)
+
+        guard let session = GeminiSessionParser.parseFile(at: task) else { return XCTFail("parse returned nil") }
+        XCTAssertEqual(session.cwd, repo.path)
+        XCTAssertEqual(session.rowRepoName, "SiblingProject")
+    }
+
+    func testAntigravityArtifactsInSameConversationHaveUniqueSessionIDs() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("AgentSessions-Antigravity-IDs-\(UUID().uuidString)", isDirectory: true)
+        let conversation = root.appendingPathComponent("conv-shared", isDirectory: true)
+        try fm.createDirectory(at: conversation, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let task = conversation.appendingPathComponent("task.md")
+        let walkthrough = conversation.appendingPathComponent("walkthrough.md")
+        try writeText("# Task\n", to: task)
+        try writeText("# Walkthrough\n", to: walkthrough)
+
+        let sessions = [task, walkthrough].compactMap { GeminiSessionParser.parseFile(at: $0) }
+        XCTAssertEqual(Set(sessions.map(\.id)), ["conv-shared#task", "conv-shared#walkthrough"])
+        XCTAssertEqual(Set(sessions.compactMap { GeminiSessionIDHelper.deriveSessionID(from: $0) }), ["conv-shared"])
     }
 
     func testOpenClawDiscoveryFindsAgentSessionFiles() throws {

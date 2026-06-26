@@ -113,6 +113,7 @@ final class SessionIndexer: ObservableObject {
     private let transcriptCache = TranscriptCache()
     private let progressThrottler = ProgressThrottler()
     private var refreshTask: Task<Void, Never>? = nil
+    private var sideChatRefreshTask: Task<Void, Never>? = nil
 
     // Expose cache for SearchCoordinator (internal - not public API)
     internal var searchTranscriptCache: TranscriptCache { transcriptCache }
@@ -249,8 +250,8 @@ final class SessionIndexer: ObservableObject {
                                                          transcriptCache: self?.transcriptCache,
                                                          allowTranscriptGeneration: !FeatureFlags.filterUsesCachedTranscriptOnly)
 
-                if self?.hideZeroMessageSessionsPref ?? true { results = results.filter { $0.messageCount > 0 } }
-                if self?.hideLowMessageSessionsPref ?? true { results = results.filter { $0.messageCount == 0 || $0.messageCount > 2 } }
+                if self?.hideZeroMessageSessionsPref ?? true { results = results.filter { $0.isSideChat || $0.messageCount > 0 } }
+                if self?.hideLowMessageSessionsPref ?? true { results = results.filter { $0.isSideChat || $0.messageCount == 0 || $0.messageCount > 2 } }
                 if !(self?.showHousekeepingSessionsPref ?? false) { results = results.filter { !$0.isHousekeeping } }
 
                 return results
@@ -458,11 +459,12 @@ final class SessionIndexer: ObservableObject {
                             eventCount: max(current.eventCount, fullSession.nonMetaCount),
                             events: fullSession.events,
                             cwd: current.lightweightCwd ?? fullSession.cwd,
-                            repoName: current.repoName,
+                            repoName: current.lightweightRepoName,
                             lightweightTitle: current.lightweightTitle,
                             lightweightCommands: current.lightweightCommands,
                             parentSessionID: fullSession.parentSessionID ?? current.parentSessionID,
                             subagentType: fullSession.subagentType ?? current.subagentType,
+                            relationshipKind: fullSession.relationshipKind ?? current.relationshipKind,
                             customTitle: fullSession.customTitle ?? current.customTitle,
                             codexOriginator: fullSession.codexOriginator ?? current.codexOriginator,
                             codexSource: fullSession.codexSource ?? current.codexSource,
@@ -590,8 +592,8 @@ final class SessionIndexer: ObservableObject {
                                                          filters: filters,
                                                          transcriptCache: self.transcriptCache,
                                                          allowTranscriptGeneration: !FeatureFlags.filterUsesCachedTranscriptOnly)
-                if self.hideZeroMessageSessionsPref { results = results.filter { $0.messageCount > 0 } }
-                if self.hideLowMessageSessionsPref { results = results.filter { $0.messageCount == 0 || $0.messageCount > 2 } }
+                if self.hideZeroMessageSessionsPref { results = results.filter { $0.isSideChat || $0.messageCount > 0 } }
+                if self.hideLowMessageSessionsPref { results = results.filter { $0.isSideChat || $0.messageCount == 0 || $0.messageCount > 2 } }
                 if !self.showHousekeepingSessionsPref { results = results.filter { !$0.isHousekeeping } }
                 // FilterEngine now preserves order, so filtered results maintain allSessions sort order
                 DispatchQueue.main.async {
@@ -647,6 +649,8 @@ final class SessionIndexer: ObservableObject {
         refreshToken = token
         refreshTask?.cancel()
         refreshTask = nil
+        sideChatRefreshTask?.cancel()
+        sideChatRefreshTask = nil
         transcriptPrewarmTask?.cancel()
         transcriptPrewarmTask = nil
         launchPhase = .hydrating
@@ -700,10 +704,10 @@ final class SessionIndexer: ObservableObject {
                 var hydratedSessions = existingSessions
                 Self.applyCodexStateMetadata(&hydratedSessions, from: stateThreads)
                 Self.applyCodexThreadNames(&hydratedSessions, from: threadNames)
-                let finalHydratedSessions = hydratedSessions
+                let hydratedSnapshot = hydratedSessions
                 await MainActor.run {
                     guard self.refreshToken == token else { return }
-                    self.allSessions = SessionArchiveManager.shared.mergePinnedArchiveFallbacks(into: finalHydratedSessions, source: .codex)
+                    self.allSessions = SessionArchiveManager.shared.mergePinnedArchiveFallbacks(into: hydratedSnapshot, source: .codex)
                     self.scheduleCodexInternalSessionIDBackfillIfNeeded(in: self.allSessions)
                     self.totalFiles = existingSessions.count
                     self.filesProcessed = existingSessions.count
@@ -852,6 +856,7 @@ final class SessionIndexer: ObservableObject {
                         codexInternalSessionIDHint: session.codexInternalSessionIDHint ?? existing.codexInternalSessionIDHint,
                         parentSessionID: session.parentSessionID ?? existing.parentSessionID,
                         subagentType: session.subagentType ?? existing.subagentType,
+                        relationshipKind: session.relationshipKind ?? existing.relationshipKind,
                         customTitle: session.customTitle ?? existing.customTitle,
                         codexOriginator: session.codexOriginator ?? existing.codexOriginator,
                         codexSource: session.codexSource ?? existing.codexSource,
@@ -882,7 +887,7 @@ final class SessionIndexer: ObservableObject {
 
             // Persist lightweight session_meta so subsequent hydration is complete.
             // Excludes probe sessions to match analytics policy.
-            let sessionsForMeta = allParsedSessions.filter { !CodexProbeConfig.isProbeSession($0) }
+            let sessionsForMeta = allParsedSessions.filter { !CodexProbeConfig.isProbeSession($0) && !$0.isSideChat }
             if !sessionsForMeta.isEmpty {
                 do {
                     let db = try IndexDB()
@@ -899,7 +904,11 @@ final class SessionIndexer: ObservableObject {
             }
             await MainActor.run {
                 guard self.refreshToken == token else { return }
-                LaunchProfiler.log("Codex.refresh: sessions merged (total=\(mergedWithArchives.count))")
+                let priorSideChats = self.allSessions.filter(\.isSideChat)
+                let mergedWithPreviousSideChats = Self.sortedByModifiedDescending(
+                    Self.appendingCodexSideChats(priorSideChats, to: mergedWithArchives)
+                )
+                LaunchProfiler.log("Codex.refresh: sessions merged (total=\(mergedWithPreviousSideChats.count))")
 
                 // Preserve in-memory backfilled codex internal IDs if this merged snapshot
                 // was assembled from an older session snapshot.
@@ -914,8 +923,8 @@ final class SessionIndexer: ObservableObject {
 
                 var missingHintUpdates: [String: String] = [:]
                 if !priorCodexHintsByID.isEmpty {
-                    missingHintUpdates.reserveCapacity(mergedWithArchives.count)
-                    for session in mergedWithArchives {
+                    missingHintUpdates.reserveCapacity(mergedWithPreviousSideChats.count)
+                    for session in mergedWithPreviousSideChats {
                         guard session.source == .codex,
                               (session.codexInternalSessionIDHint?.isEmpty ?? true),
                               let hint = priorCodexHintsByID[session.id] else { continue }
@@ -923,7 +932,7 @@ final class SessionIndexer: ObservableObject {
                     }
                 }
 
-                self.allSessions = mergedWithArchives
+                self.allSessions = mergedWithPreviousSideChats
                 if !missingHintUpdates.isEmpty {
                     self.applyCodexInternalSessionIDHintUpdates(missingHintUpdates)
                 }
@@ -1003,6 +1012,7 @@ final class SessionIndexer: ObservableObject {
                     self.filesProcessed = self.totalFiles
                     self.progressText = "Indexed \(self.totalFiles)/\(self.totalFiles)"
                 }
+                self.scheduleSideChatRefresh(token: token, sessionsRoot: root)
 
                 // Wait a moment for filters to apply, then check what's visible
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -1025,6 +1035,8 @@ final class SessionIndexer: ObservableObject {
         refreshToken = UUID()
         refreshTask?.cancel()
         refreshTask = nil
+        sideChatRefreshTask?.cancel()
+        sideChatRefreshTask = nil
         codexInternalIDBackfillTask?.cancel()
         codexInternalIDBackfillTask = nil
         transcriptPrewarmTask?.cancel()
@@ -1035,6 +1047,38 @@ final class SessionIndexer: ObservableObject {
         if launchPhase != .error {
             launchPhase = .ready
         }
+    }
+
+    @MainActor
+    private func scheduleSideChatRefresh(token: UUID, sessionsRoot: URL) {
+        sideChatRefreshTask?.cancel()
+        sideChatRefreshTask = Task.detached(priority: .utility) { [weak self, token, sessionsRoot] in
+            let cachedSideChats = CodexSideChatLogReader.loadCachedSideChatSessions(sessionsRoot: sessionsRoot)
+            if Task.isCancelled { return }
+            if !cachedSideChats.isEmpty {
+                await self?.publishSideChats(cachedSideChats, token: token, source: "cache")
+            }
+
+            LaunchProfiler.log("Codex.sideChats: refresh start")
+            let sideChatSessions = CodexSideChatLogReader.loadSideChatSessions(sessionsRoot: sessionsRoot)
+            if Task.isCancelled { return }
+            await self?.publishSideChats(sideChatSessions, token: token, source: "sqlite")
+        }
+    }
+
+    @MainActor
+    private func publishSideChats(_ sideChats: [Session], token: UUID, source: String) {
+        guard refreshToken == token else { return }
+        if source == "sqlite" {
+            sideChatRefreshTask = nil
+        }
+
+        let existingSideChats = allSessions.filter { $0.isSideChat }
+        let sideChatsToPublish = Self.mergingCodexSideChats(sideChats, withExisting: existingSideChats)
+        let base = allSessions.filter { !$0.isSideChat }
+        let merged = Self.sortedByModifiedDescending(Self.appendingCodexSideChats(sideChatsToPublish, to: base))
+        allSessions = merged
+        LaunchProfiler.log("Codex.sideChats: \(source) publish (sideChats=\(sideChatsToPublish.count), incoming=\(sideChats.count), total=\(merged.count))")
     }
 
     private func seedKnownFileStatsIfNeeded() async {
@@ -1065,7 +1109,7 @@ final class SessionIndexer: ObservableObject {
             endTS: Int64((s.endTime ?? s.modifiedAt).timeIntervalSince1970),
             model: s.model,
             cwd: s.lightweightCwd,
-            repo: s.repoName,
+            repo: s.rowRepoName,
             title: s.lightweightTitle,
             codexInternalSessionID: s.codexInternalSessionIDHint,
             isHousekeeping: s.isHousekeeping,
@@ -1324,6 +1368,7 @@ final class SessionIndexer: ObservableObject {
                 codexInternalSessionIDHint: internalID,
                 parentSessionID: session.parentSessionID,
                 subagentType: session.subagentType,
+                relationshipKind: session.relationshipKind,
                 customTitle: session.customTitle,
                 codexOriginator: session.codexOriginator,
                 codexSource: session.codexSource,
@@ -1515,6 +1560,7 @@ final class SessionIndexer: ObservableObject {
                 codexInternalSessionIDHint: sessions[i].codexInternalSessionIDHint,
                 parentSessionID: sessions[i].parentSessionID,
                 subagentType: sessions[i].subagentType,
+                relationshipKind: sessions[i].relationshipKind,
                 customTitle: sessions[i].customTitle,
                 codexOriginator: sessions[i].codexOriginator,
                 codexSource: sessions[i].codexSource,
@@ -1526,6 +1572,36 @@ final class SessionIndexer: ObservableObject {
             )
             rebuilt.isFavorite = wasFavorite
             sessions[i] = rebuilt
+        }
+    }
+
+    private static func appendingCodexSideChats(_ sideChats: [Session], to sessions: [Session]) -> [Session] {
+        guard !sideChats.isEmpty else { return sessions }
+        var merged = sessions
+        var existingIDs = Set(sessions.map(\.id))
+        merged.reserveCapacity(sessions.count + sideChats.count)
+        for sideChat in sideChats {
+            guard existingIDs.insert(sideChat.id).inserted else { continue }
+            merged.append(sideChat)
+        }
+        return merged
+    }
+
+    private static func mergingCodexSideChats(_ incoming: [Session], withExisting existing: [Session]) -> [Session] {
+        guard !existing.isEmpty else { return incoming }
+        guard !incoming.isEmpty else { return existing }
+
+        var byID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        for session in incoming {
+            byID[session.id] = session
+        }
+        return Array(byID.values)
+    }
+
+    private static func sortedByModifiedDescending(_ sessions: [Session]) -> [Session] {
+        sessions.sorted { lhs, rhs in
+            if lhs.modifiedAt == rhs.modifiedAt { return lhs.id > rhs.id }
+            return lhs.modifiedAt > rhs.modifiedAt
         }
     }
 
@@ -1720,6 +1796,7 @@ final class SessionIndexer: ObservableObject {
                 codexInternalSessionIDHint: hint,
                 parentSessionID: sessions[i].parentSessionID,
                 subagentType: sessions[i].subagentType,
+                relationshipKind: sessions[i].relationshipKind,
                 customTitle: name,
                 codexOriginator: sessions[i].codexOriginator,
                 codexSource: sessions[i].codexSource,
@@ -1835,13 +1912,14 @@ final class SessionIndexer: ObservableObject {
         var codexSurfaceMetadata: CodexSurfaceMetadata? = nil
         var reasoningEffort: String? = nil
         var idx = 0
+        let eventIDBase = Self.hash(path: url.path)
         DBG("    📖 parseFileFull: Starting forEachLine...")
         do {
             try reader.forEachLine { rawLine in
                 idx += 1
                 // Only sanitize very large lines (>100KB) - sanitizeLargeLine has its own guards for smaller lines
                 let safeLine = rawLine.utf8.count > 100_000 ? Self.sanitizeLargeLine(rawLine) : rawLine
-                let (event, maybeModel) = Self.parseLine(safeLine, eventID: self.eventID(for: url, index: idx))
+                let (event, maybeModel) = Self.parseLine(safeLine, eventID: Self.eventID(base: eventIDBase, index: idx))
                 if let m = maybeModel, modelSeen == nil { modelSeen = m }
 
                 // Extract subagent info and turn_context model from early lines
@@ -1882,7 +1960,7 @@ final class SessionIndexer: ObservableObject {
             }
         } catch {
             // If file can't be read, emit a single error meta event
-            let event = SessionEvent(id: eventID(for: url, index: 0), timestamp: Date(), kind: .error, role: "system", text: "Failed to read: \(error.localizedDescription)", toolName: nil, toolInput: nil, toolOutput: nil, messageID: nil, parentID: nil, isDelta: false, rawJSON: "{}")
+            let event = SessionEvent(id: Self.eventID(base: eventIDBase, index: 0), timestamp: Date(), kind: .error, role: "system", text: "Failed to read: \(error.localizedDescription)", toolName: nil, toolInput: nil, toolOutput: nil, messageID: nil, parentID: nil, isDelta: false, rawJSON: "{}")
             events.append(event)
         }
 
@@ -2495,12 +2573,16 @@ final class SessionIndexer: ObservableObject {
 
     private func eventID(for url: URL, index: Int) -> String {
         let base = Self.hash(path: url.path)
-        return base + String(format: "-%04d", index)
+        return Self.eventID(base: base, index: index)
     }
 
     static func eventID(forPath path: String, index: Int) -> String {
         let base = hash(path: path)
-        return base + String(format: "-%04d", index)
+        return eventID(base: base, index: index)
+    }
+
+    private static func eventID(base: String, index: Int) -> String {
+        base + String(format: "-%04d", index)
     }
 
     private static func hash(path: String) -> String {

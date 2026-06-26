@@ -1512,7 +1512,7 @@ final class CodexActiveSessionsModel: ObservableObject {
 
     nonisolated private static func supportsLiveSessionSource(_ source: SessionSource) -> Bool {
         switch source {
-        case .codex, .claude, .opencode:
+        case .codex, .claude, .gemini, .antigravity, .opencode:
             return true
         default:
             return false
@@ -2438,7 +2438,7 @@ final class CodexActiveSessionsModel: ObservableObject {
         var out: [String] = []
         out.reserveCapacity(presences.count)
         for presence in presences {
-            guard presence.source == .codex || presence.source == .claude || presence.source == .opencode else { continue }
+            guard presence.source == .codex || presence.source == .claude || presence.source == .gemini || presence.source == .antigravity || presence.source == .opencode else { continue }
             guard canAttemptITerm2TailProbe(
                 itermSessionId: presence.terminal?.itermSessionId,
                 tty: presence.tty,
@@ -4122,12 +4122,25 @@ final class CodexActiveSessionsModel: ObservableObject {
             .joined(separator: " ")
     }
 
+    nonisolated static func isLikelyAntigravityITermSessionName(_ rawName: String) -> Bool {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return false }
+        let normalized = normalizeITermSessionNameForMatching(rawName)
+        guard !normalized.isEmpty else { return false }
+        if normalized == "agy" || normalized == "antigravity" || normalized == "antigravity cli" { return true }
+        if normalized.hasSuffix(" agy") || normalized.hasSuffix(" antigravity") || normalized.hasSuffix(" antigravity cli") { return true }
+        if trimmed.hasPrefix("agy ") || trimmed.hasPrefix("antigravity ") { return true }
+        return false
+    }
+
     nonisolated static func isLikelyITermSessionName(_ rawName: String, source: SessionSource) -> Bool {
         switch source {
         case .codex:
             return isLikelyCodexITermSessionName(rawName)
         case .claude:
             return isLikelyClaudeITermSessionName(rawName)
+        case .antigravity:
+            return isLikelyAntigravityITermSessionName(rawName)
         case .opencode:
             return isLikelyOpenCodeITermSessionName(rawName)
         default:
@@ -4255,6 +4268,8 @@ final class CodexActiveSessionsModel: ObservableObject {
             return true
         case .opencode:
             return ext == "json" && fileName.hasPrefix("ses_")
+        case .gemini:
+            return ext == "md"
         default:
             return false
         }
@@ -4273,6 +4288,8 @@ final class CodexActiveSessionsModel: ObservableObject {
                 return String(base.dropFirst("ses_".count))
             }
             return nil
+        case .gemini:
+            return GeminiSessionIDHelper.artifactID(fromArtifactURL: URL(fileURLWithPath: path))
         default:
             return nil
         }

@@ -1,5 +1,58 @@
 import SwiftUI
 
+struct LimitAlertReadinessFormatter {
+    static func text(provider: String,
+                     source: String,
+                     freshness: String,
+                     observedAt: Double,
+                     projection: String,
+                     projectionRunoutAt: Double,
+                     projectionObservedAt: Double,
+                     delivery: String,
+                     deliveryAt: Double,
+                     notificationsEnabled: Bool,
+                     providerEnabled: Bool,
+                     visualEnabled: Bool,
+                     soundEnabled: Bool,
+                     now: Date = Date()) -> String {
+        guard notificationsEnabled else { return "Alerts off" }
+        guard providerEnabled else { return "Alerts off for \(provider)" }
+        if !visualEnabled && !soundEnabled { return "Delivery off" }
+
+        if observedAt <= 0 || source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Waiting for usage data"
+        }
+
+        let age = now.timeIntervalSince(Date(timeIntervalSince1970: observedAt))
+        if age > 10 * 60 || freshness.localizedCaseInsensitiveContains("stale") {
+            return "Stale; alerts may be delayed"
+        }
+
+        let deliveryText = delivery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if visualEnabled,
+           deliveryAt > 0,
+           deliveryText.contains("denied")
+            || deliveryText.contains("failed")
+            || deliveryText.contains("unknown") {
+            return "Notifications need attention"
+        }
+
+        let projectionText = formatUsageProjectionDiagnosticsText(
+            projection,
+            runoutAt: projectionRunoutAt,
+            observedAt: projectionObservedAt,
+            now: now
+        )
+        if projectionText.hasPrefix("Active ") {
+            return "Watching active 5h burn"
+        }
+        if !visualEnabled {
+            return "Ready; sound only"
+        }
+        return "Ready"
+    }
+}
+
 extension PreferencesView {
 
     private var webApiEffectivelyEnabled: Bool {
@@ -29,11 +82,11 @@ extension PreferencesView {
                 labeledRow("Refresh every") {
                     Picker("", selection: $codexPollingInterval) {
                         Text("1 minute").tag(60)
-                        Text("5 minutes").tag(300)
-                        Text("15 minutes").tag(900)
+                        Text("2 minutes").tag(120)
+                        Text("3 minutes").tag(180)
                     }
                     .pickerStyle(.segmented)
-                    .help("How often to refresh Codex usage")
+                    .help("How often to refresh Codex usage while a usage surface is visible. Automatic /status probes keep their separate cooldowns.")
                 }
                 .disabled(!codexAgentEnabled)
 
@@ -88,12 +141,11 @@ extension PreferencesView {
                 }
                 labeledRow("Refresh every") {
                     Picker("", selection: $claudePollingInterval) {
+                        Text("2 minutes").tag(120)
                         Text("3 minutes").tag(180)
-                        Text("15 minutes").tag(900)
-                        Text("30 minutes").tag(1800)
                     }
                     .pickerStyle(.segmented)
-                    .help("How often to refresh Claude usage (applies to tmux path; OAuth always refreshes every 60s)")
+                    .help("How often to refresh Claude tmux fallback while a usage surface is visible. OAuth and Web API sources refresh every 60 seconds.")
                 }
                 .disabled(!claudeAgentEnabled || !claudeUsageEnabled)
             }
@@ -117,7 +169,7 @@ extension PreferencesView {
             // Display style (shared across Codex & Claude)
             sectionHeader("Display Style")
             VStack(alignment: .leading, spacing: 12) {
-                labeledRow("Limits display") {
+                labeledRow("Quota Meter display") {
                     Picker("", selection: Binding(
                         get: { UsageDisplayMode(rawValue: usageDisplayModeRaw) ?? .left },
                         set: { usageDisplayModeRaw = $0.rawValue }
@@ -129,17 +181,50 @@ extension PreferencesView {
                     .pickerStyle(.segmented)
                     .help("Choose whether usage meters show remaining (left) or used percentages.")
                 }
-                Text("Applies to Codex and Claude usage strips and menu bar reset meters.")
+                Text("Applies to Codex and Claude usage strips, menu bar reset meters, and the Quota Meter.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                labeledRow("Session Runway") {
+                    Picker("", selection: Binding(
+                        get: { QuotaMeterRunwayVisibility.current(raw: quotaMeterRunwayVisibilityRaw) },
+                        set: { quotaMeterRunwayVisibilityRaw = $0.rawValue }
+                    )) {
+                        ForEach(QuotaMeterRunwayVisibility.allCases) { visibility in
+                            Text(visibility.title).tag(visibility)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Choose when Quota Meter shows the Codex session runway drawer.")
+                }
             }
 
-            sectionHeader("Limit Notifications")
+            // Menu Bar controls moved to the Menu Bar pane
+        }
+        .onAppear(perform: normalizeUsagePollingIntervals)
+    }
+
+    private func normalizeUsagePollingIntervals() {
+        if ![60, 120, 180].contains(codexPollingInterval) {
+            codexPollingInterval = 60
+        }
+        if ![120, 180].contains(claudePollingInterval) {
+            claudePollingInterval = 180
+        }
+    }
+
+    var limitAlertsTab: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Limit Alerts")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            sectionHeader("Alert Sources")
             VStack(alignment: .leading, spacing: 12) {
                 toggleRow(
                     "Notify for usage limits",
                     isOn: $usageLimitNotificationsEnabled,
-                    help: "Show alerts when Codex or Claude 5h and weekly limits are low, exhausted, or when a 5h window resets."
+                    help: "Enable Codex and Claude usage-limit alerts."
                 )
                 .disabled(!(codexAgentEnabled && codexUsageEnabled) && !(claudeAgentEnabled && claudeUsageEnabled))
 
@@ -152,35 +237,26 @@ extension PreferencesView {
                             .toggleStyle(.checkbox)
                             .disabled(!claudeAgentEnabled || !claudeUsageEnabled || !usageLimitNotificationsEnabled)
                     }
-                    .help("Choose which usage sources can send limit notifications.")
+                    .help("Choose which usage sources can send limit alerts.")
                 }
                 .disabled(!usageLimitNotificationsEnabled)
+            }
 
+            sectionHeader("Alert Types")
+            VStack(alignment: .leading, spacing: 12) {
                 labeledRow("Warnings") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Approaching limit", isOn: $usageLimitNotificationApproachingEnabled)
+                        Toggle("Low remaining", isOn: $usageLimitNotificationApproachingEnabled)
+                            .toggleStyle(.checkbox)
+                        Toggle("Predicted run-out soon", isOn: $usageLimitNotificationProjectedEnabled)
                             .toggleStyle(.checkbox)
                         Toggle("Limit exhausted", isOn: $usageLimitNotificationExhaustedEnabled)
                             .toggleStyle(.checkbox)
-                        Toggle("5h is back again", isOn: $usageLimitNotificationFiveHourResetEnabled)
+                        Toggle("5h reset reminder", isOn: $usageLimitNotificationFiveHourResetEnabled)
                             .toggleStyle(.checkbox)
                     }
-                    .help("Choose which limit events should create notifications.")
+                    .help("Choose which limit events should create alerts.")
                 }
-                .disabled(!usageLimitNotificationsEnabled)
-
-                toggleRow(
-                    "Visual notifications",
-                    isOn: $usageLimitNotificationVisualEnabled,
-                    help: "Use macOS notifications for usage limit alerts."
-                )
-                .disabled(!usageLimitNotificationsEnabled)
-
-                toggleRow(
-                    "Play sound",
-                    isOn: $usageLimitNotificationSoundEnabled,
-                    help: "Play a sound for immediate usage limit alerts and scheduled 5h reset notifications."
-                )
                 .disabled(!usageLimitNotificationsEnabled)
 
                 labeledRow("Low limit threshold") {
@@ -192,9 +268,269 @@ extension PreferencesView {
                     .help("Alert once per reset window when a 5h or weekly limit reaches this remaining percentage.")
                 }
                 .disabled(!usageLimitNotificationsEnabled || !usageLimitNotificationApproachingEnabled)
+
+                Text("Prediction alerts use fresh usage data and fire when the current burn rate can exhaust a 5h or weekly limit within 60 minutes before reset. Recent cached data can still produce low, exhausted, and 5h reset alerts; stale data is ignored.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Menu Bar controls moved to the Menu Bar pane
+            sectionHeader("Cockpit Display")
+            VStack(alignment: .leading, spacing: 12) {
+                labeledRow("Projection") {
+                    Toggle("Show 5h run-out token", isOn: $usageLimitCockpitProjectionEnabled)
+                        .toggleStyle(.checkbox)
+                        .help("Show a compact token such as ▸2h in Cockpit when fresh 5h usage samples project exhaustion before reset.")
+                }
+
+                Text("Cockpit run-out tokens use fresh 5h usage velocity and can show longer before-reset ETAs than notification alerts. This display setting is independent of notification delivery.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            sectionHeader("Diagnostics")
+            TimelineView(.periodic(from: Date(), by: 30)) { _ in
+                VStack(alignment: .leading, spacing: 8) {
+                    limitAlertDiagnosticsRow(
+                        provider: "Codex",
+                        source: usageLimitDiagnosticsCodexSource,
+                        freshness: usageLimitDiagnosticsCodexFreshness,
+                        observedAt: usageLimitDiagnosticsCodexObservedAt,
+                        projection: usageLimitDiagnosticsCodexProjection,
+                        projectionRunoutAt: usageLimitDiagnosticsCodexProjectionRunoutAt,
+                        projectionObservedAt: usageLimitDiagnosticsCodexProjectionObservedAt,
+                        lastAlert: usageLimitDiagnosticsCodexLastAlertSummary,
+                        lastAlertAt: usageLimitDiagnosticsCodexLastAlertAt,
+                        delivery: usageLimitDiagnosticsCodexDelivery,
+                        deliveryAt: usageLimitDiagnosticsCodexDeliveryAt,
+                        nextResetAt: usageLimitDiagnosticsCodexNextResetReminderAt
+                    )
+                    Divider()
+                    limitAlertDiagnosticsRow(
+                        provider: "Claude",
+                        source: usageLimitDiagnosticsClaudeSource,
+                        freshness: usageLimitDiagnosticsClaudeFreshness,
+                        observedAt: usageLimitDiagnosticsClaudeObservedAt,
+                        projection: usageLimitDiagnosticsClaudeProjection,
+                        projectionRunoutAt: usageLimitDiagnosticsClaudeProjectionRunoutAt,
+                        projectionObservedAt: usageLimitDiagnosticsClaudeProjectionObservedAt,
+                        lastAlert: usageLimitDiagnosticsClaudeLastAlertSummary,
+                        lastAlertAt: usageLimitDiagnosticsClaudeLastAlertAt,
+                        delivery: usageLimitDiagnosticsClaudeDelivery,
+                        deliveryAt: usageLimitDiagnosticsClaudeDeliveryAt,
+                        nextResetAt: usageLimitDiagnosticsClaudeNextResetReminderAt
+                    )
+                    Text("Updates when usage tracking receives a limit snapshot. Projection diagnostics use fresh or recent cached data; reset reminders require banners and 5h reset reminders to be enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            sectionHeader("Delivery")
+            VStack(alignment: .leading, spacing: 12) {
+                toggleRow(
+                    "macOS notification banners",
+                    isOn: $usageLimitNotificationVisualEnabled,
+                    help: "Use macOS notifications for usage limit alerts and scheduled 5h reset reminders."
+                )
+                .disabled(!usageLimitNotificationsEnabled)
+
+                toggleRow(
+                    "Play sound for immediate alerts",
+                    isOn: $usageLimitNotificationSoundEnabled,
+                    help: "Play a sound when a low, predicted, exhausted, or reset-complete alert fires. Scheduled reset reminders use macOS notification sound when banners are enabled."
+                )
+                .disabled(!usageLimitNotificationsEnabled)
+            }
+        }
+        .onAppear(perform: seedProjectedAlertDefault)
+        .onAppear(perform: cancelDisabledLimitResetReminders)
+        .onChange(of: usageLimitNotificationsEnabled) { _, _ in cancelDisabledLimitResetReminders() }
+        .onChange(of: usageLimitNotificationVisualEnabled) { _, _ in cancelDisabledLimitResetReminders() }
+        .onChange(of: usageLimitNotificationFiveHourResetEnabled) { _, _ in cancelDisabledLimitResetReminders() }
+        .onChange(of: usageLimitNotificationCodexEnabled) { _, _ in cancelDisabledLimitResetReminders() }
+        .onChange(of: usageLimitNotificationClaudeEnabled) { _, _ in cancelDisabledLimitResetReminders() }
+    }
+
+    private func limitAlertDiagnosticsRow(provider: String,
+                                          source: String,
+                                          freshness: String,
+                                          observedAt: Double,
+                                          projection: String,
+                                          projectionRunoutAt: Double,
+                                          projectionObservedAt: Double,
+                                          lastAlert: String,
+                                          lastAlertAt: Double,
+                                          delivery: String,
+                                          deliveryAt: Double,
+                                          nextResetAt: Double) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(provider)
+                .font(.subheadline)
+                .fontWeight(.semibold)
+            Text(limitAlertReadinessText(
+                provider: provider,
+                source: source,
+                freshness: freshness,
+                observedAt: observedAt,
+                projection: projection,
+                projectionRunoutAt: projectionRunoutAt,
+                projectionObservedAt: projectionObservedAt,
+                delivery: delivery,
+                deliveryAt: deliveryAt
+            ))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack(alignment: .top, spacing: 16) {
+                diagnosticsField(
+                    "Source",
+                    value: emptyFallback(source, fallback: "Waiting for data")
+                )
+                diagnosticsField(
+                    "Freshness",
+                    value: diagnosticsFreshnessText(freshness: freshness, observedAt: observedAt)
+                )
+                diagnosticsField(
+                    "5h Projection",
+                    value: formatUsageProjectionDiagnosticsText(
+                        projection,
+                        runoutAt: projectionRunoutAt,
+                        observedAt: projectionObservedAt
+                    )
+                )
+            }
+            HStack(alignment: .top, spacing: 16) {
+                diagnosticsField(
+                    "Last Alert",
+                    value: diagnosticsLastAlertText(summary: lastAlert, timestamp: lastAlertAt)
+                )
+                diagnosticsField(
+                    "Delivery",
+                    value: diagnosticsDeliveryText(summary: delivery, timestamp: deliveryAt)
+                )
+                diagnosticsField(
+                    "Next 5h Reminder",
+                    value: diagnosticsNextResetText(timestamp: nextResetAt)
+                )
+            }
+        }
+    }
+
+    private func limitAlertReadinessText(provider: String,
+                                         source: String,
+                                         freshness: String,
+                                         observedAt: Double,
+                                         projection: String,
+                                         projectionRunoutAt: Double,
+                                         projectionObservedAt: Double,
+                                         delivery: String,
+                                         deliveryAt: Double) -> String {
+        LimitAlertReadinessFormatter.text(
+            provider: provider,
+            source: source,
+            freshness: freshness,
+            observedAt: observedAt,
+            projection: projection,
+            projectionRunoutAt: projectionRunoutAt,
+            projectionObservedAt: projectionObservedAt,
+            delivery: delivery,
+            deliveryAt: deliveryAt,
+            notificationsEnabled: usageLimitNotificationsEnabled,
+            providerEnabled: provider == "Codex" ? usageLimitNotificationCodexEnabled : usageLimitNotificationClaudeEnabled,
+            visualEnabled: usageLimitNotificationVisualEnabled,
+            soundEnabled: usageLimitNotificationSoundEnabled
+        )
+    }
+
+    private func diagnosticsField(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .minimumScaleFactor(0.85)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func diagnosticsLastAlertText(summary: String, timestamp: Double) -> String {
+        guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, timestamp > 0 else {
+            return "None yet"
+        }
+        return "\(summary) / \(relativeTimestamp(timestamp))"
+    }
+
+    private func diagnosticsDeliveryText(summary: String, timestamp: Double) -> String {
+        guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, timestamp > 0 else {
+            return "None yet"
+        }
+        return "\(summary) / \(relativeTimestamp(timestamp))"
+    }
+
+    private func diagnosticsFreshnessText(freshness: String, observedAt: Double) -> String {
+        let base = emptyFallback(freshness, fallback: "Waiting for data")
+        guard observedAt > 0 else { return base }
+        let age = Date().timeIntervalSince(Date(timeIntervalSince1970: observedAt))
+        let adjusted: String
+        if age > 10 * 60 {
+            adjusted = "stale"
+        } else if age > 3 * 60 {
+            adjusted = base.replacingOccurrences(of: "fresh", with: "stale")
+        } else {
+            adjusted = base
+        }
+        return "\(adjusted) / seen \(relativeTimestamp(observedAt))"
+    }
+
+    private func diagnosticsNextResetText(timestamp: Double) -> String {
+        guard usageLimitNotificationsEnabled,
+              usageLimitNotificationVisualEnabled,
+              usageLimitNotificationFiveHourResetEnabled else {
+            return "Off"
+        }
+        guard timestamp > 0 else { return "None scheduled" }
+        let date = Date(timeIntervalSince1970: timestamp)
+        if date < Date() { return "Expired" }
+        let timeText = DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .short)
+        return "\(timeText) / \(relativeTimestamp(timestamp))"
+    }
+
+    private func relativeTimestamp(_ timestamp: Double) -> String {
+        let date = Date(timeIntervalSince1970: timestamp)
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private func emptyFallback(_ value: String, fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private func seedProjectedAlertDefault() {
+        guard UserDefaults.standard.object(forKey: PreferencesKey.usageLimitNotificationProjectedEnabled) == nil else {
+            return
+        }
+        usageLimitNotificationProjectedEnabled = usageLimitNotificationApproachingEnabled
+    }
+
+    private func cancelDisabledLimitResetReminders() {
+        let resetRemindersGloballyDisabled = !usageLimitNotificationsEnabled
+            || !usageLimitNotificationVisualEnabled
+            || !usageLimitNotificationFiveHourResetEnabled
+        if resetRemindersGloballyDisabled || !usageLimitNotificationCodexEnabled {
+            UsageLimitNotifier.shared.cancelScheduledFiveHourReset(provider: .codex)
+        }
+        if resetRemindersGloballyDisabled || !usageLimitNotificationClaudeEnabled {
+            UsageLimitNotifier.shared.cancelScheduledFiveHourReset(provider: .claude)
         }
     }
 

@@ -64,7 +64,7 @@ struct PreferencesView: View {
     // CLI availability (assume installed until a probe fails)
     @AppStorage(PreferencesKey.codexCLIAvailable) var codexCLIAvailable: Bool = true
     @AppStorage(PreferencesKey.claudeCLIAvailable) var claudeCLIAvailable: Bool = true
-    @AppStorage(PreferencesKey.geminiCLIAvailable) var geminiCLIAvailable: Bool = true
+    @AppStorage(PreferencesKey.antigravityCLIAvailable) var geminiCLIAvailable: Bool = true
     @AppStorage(PreferencesKey.openCodeCLIAvailable) var openCodeCLIAvailable: Bool = true
     @AppStorage(PreferencesKey.hermesCLIAvailable) var hermesCLIAvailable: Bool = true
     @AppStorage(PreferencesKey.copilotCLIAvailable) var copilotCLIAvailable: Bool = true
@@ -93,6 +93,7 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.stripShowResetTime) var stripShowResetTime: Bool = false
     @AppStorage(PreferencesKey.stripMonochromeMeters) var stripMonochromeGlobal: Bool = false
     @AppStorage(PreferencesKey.usageDisplayMode) var usageDisplayModeRaw: String = UsageDisplayMode.left.rawValue
+    @AppStorage(PreferencesKey.quotaMeterRunwayVisibility) var quotaMeterRunwayVisibilityRaw: String = QuotaMeterRunwayVisibility.automatic.rawValue
     @AppStorage(PreferencesKey.usageLimitNotificationsEnabled) var usageLimitNotificationsEnabled: Bool = true
     @AppStorage(PreferencesKey.usageLimitNotificationVisualEnabled) var usageLimitNotificationVisualEnabled: Bool = true
     @AppStorage(PreferencesKey.usageLimitNotificationSoundEnabled) var usageLimitNotificationSoundEnabled: Bool = true
@@ -100,8 +101,32 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.usageLimitNotificationCodexEnabled) var usageLimitNotificationCodexEnabled: Bool = true
     @AppStorage(PreferencesKey.usageLimitNotificationClaudeEnabled) var usageLimitNotificationClaudeEnabled: Bool = true
     @AppStorage(PreferencesKey.usageLimitNotificationApproachingEnabled) var usageLimitNotificationApproachingEnabled: Bool = true
+    @AppStorage(PreferencesKey.usageLimitNotificationProjectedEnabled) var usageLimitNotificationProjectedEnabled: Bool = true
+    @AppStorage(PreferencesKey.usageLimitCockpitProjectionEnabled) var usageLimitCockpitProjectionEnabled: Bool = true
     @AppStorage(PreferencesKey.usageLimitNotificationExhaustedEnabled) var usageLimitNotificationExhaustedEnabled: Bool = true
     @AppStorage(PreferencesKey.usageLimitNotificationFiveHourResetEnabled) var usageLimitNotificationFiveHourResetEnabled: Bool = true
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexSource) var usageLimitDiagnosticsCodexSource: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexFreshness) var usageLimitDiagnosticsCodexFreshness: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexObservedAt) var usageLimitDiagnosticsCodexObservedAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexProjection) var usageLimitDiagnosticsCodexProjection: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexProjectionRunoutAt) var usageLimitDiagnosticsCodexProjectionRunoutAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexProjectionObservedAt) var usageLimitDiagnosticsCodexProjectionObservedAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexLastAlertSummary) var usageLimitDiagnosticsCodexLastAlertSummary: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexLastAlertAt) var usageLimitDiagnosticsCodexLastAlertAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexDelivery) var usageLimitDiagnosticsCodexDelivery: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexDeliveryAt) var usageLimitDiagnosticsCodexDeliveryAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsCodexNextResetReminderAt) var usageLimitDiagnosticsCodexNextResetReminderAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeSource) var usageLimitDiagnosticsClaudeSource: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeFreshness) var usageLimitDiagnosticsClaudeFreshness: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeObservedAt) var usageLimitDiagnosticsClaudeObservedAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeProjection) var usageLimitDiagnosticsClaudeProjection: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeProjectionRunoutAt) var usageLimitDiagnosticsClaudeProjectionRunoutAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeProjectionObservedAt) var usageLimitDiagnosticsClaudeProjectionObservedAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeLastAlertSummary) var usageLimitDiagnosticsClaudeLastAlertSummary: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeLastAlertAt) var usageLimitDiagnosticsClaudeLastAlertAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeDelivery) var usageLimitDiagnosticsClaudeDelivery: String = ""
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeDeliveryAt) var usageLimitDiagnosticsClaudeDeliveryAt: Double = 0
+    @AppStorage(PreferencesKey.usageLimitDiagnosticsClaudeNextResetReminderAt) var usageLimitDiagnosticsClaudeNextResetReminderAt: Double = 0
     @AppStorage(PreferencesKey.hideZeroMessageSessions) var hideZeroMessageSessionsPref: Bool = true
     @AppStorage(PreferencesKey.hideLowMessageSessions) var hideLowMessageSessionsPref: Bool = true
     @AppStorage(PreferencesKey.showHousekeepingSessions) var showHousekeepingSessions: Bool = false
@@ -113,8 +138,8 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.Transcript.enableCodeDiffLineNumbers) var transcriptEnableCodeDiffLineNumbers: Bool = true
     @AppStorage(PreferencesKey.Transcript.enableLinkification) var transcriptEnableLinkification: Bool = true
     // Per-agent polling intervals
-    @AppStorage(PreferencesKey.codexPollingInterval) var codexPollingInterval: Int = 300   // 1/5/15 min options, default 5m
-    @AppStorage(PreferencesKey.claudePollingInterval) var claudePollingInterval: Int = 900 // 3/15/30 min options, default 15m
+    @AppStorage(PreferencesKey.codexPollingInterval) var codexPollingInterval: Int = 60    // 1/2/3 min options, default 1m
+    @AppStorage(PreferencesKey.claudePollingInterval) var claudePollingInterval: Int = 180 // tmux fallback options, default 3m
     // Star / Pin behavior
     @AppStorage(PreferencesKey.Archives.starPinsSessions) var starPinsSessions: Bool = true
     @AppStorage(PreferencesKey.Archives.stopSyncAfterInactivityMinutes) var stopSyncAfterInactivityMinutes: Int = 30
@@ -168,13 +193,13 @@ struct PreferencesView: View {
     @State var claudePathValid: Bool = true
     @State var claudePathDebounce: DispatchWorkItem? = nil
 
-    // Gemini CLI probe state
+    // Antigravity CLI probe state
     @State var geminiProbeState: ProbeState = .idle
     @State var geminiVersionString: String? = nil
     @State var geminiResolvedPath: String? = nil
     @State var geminiProbeDebounce: DispatchWorkItem? = nil
-    // Gemini Sessions directory override
-    @AppStorage("GeminiSessionsRootOverride") var geminiSessionsPath: String = ""
+    // Antigravity artifact directory override
+    @AppStorage("AntigravitySessionsRootOverride") var geminiSessionsPath: String = ""
     @State var geminiSessionsPathValid: Bool = true
     @State var geminiSessionsPathDebounce: DispatchWorkItem? = nil
 
@@ -353,7 +378,7 @@ struct PreferencesView: View {
             .help("Enable the experimental Claude usage tracker despite the warning")
         } message: {
             Text("""
-            This feature runs Claude Code headlessly via tmux to fetch `/usage` data (default: every 15 minutes).
+            This feature runs Claude Code headlessly via tmux to fetch `/usage` data (default: every 3 minutes while visible).
 
             Requirements: Claude CLI + tmux installed and authenticated
 
@@ -388,6 +413,8 @@ struct PreferencesView: View {
                 generalTab
             case .usageTracking:
                 usageTrackingTab
+            case .limitAlerts:
+                limitAlertsTab
             case .usageProbes:
                 usageProbesTab
             case .menuBar:
@@ -455,14 +482,14 @@ struct PreferencesView: View {
             Spacer()
             Button("Reset to Defaults") { showingResetConfirm = true }
                 .buttonStyle(.bordered)
-                .help("Revert all preferences to their original values")
+                .help("Revert all settings to their original values")
             Button("Close", action: closeWindow)
                 .buttonStyle(.borderedProminent)
-                .help("Dismiss preferences without additional changes")
+                .help("Dismiss settings without additional changes")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .alert("Reset All Preferences?", isPresented: $showingResetConfirm) {
+        .alert("Reset All Settings?", isPresented: $showingResetConfirm) {
             Button("Reset", role: .destructive) { resetToDefaults() }
                 .help("Confirm and restore default settings across all tabs")
             Button("Cancel", role: .cancel) {}
@@ -775,6 +802,8 @@ struct PreferencesView: View {
         validateGrokSessionsPath()
 
         cockpitReduceTransparency = true
+        usageLimitCockpitProjectionEnabled = true
+        quotaMeterRunwayVisibilityRaw = QuotaMeterRunwayVisibility.automatic.rawValue
 
         // Reset usage strip preferences
         UserDefaults.standard.set(false, forKey: PreferencesKey.showClaudeUsageStrip)
@@ -841,6 +870,14 @@ struct PreferencesView: View {
             let shouldUpdate = showUpdateConfirmationAlert(
                 title: "\(result.source.displayName) Update Available",
                 message: "Update \(latest) is available via \(result.primaryManager.displayName).\n\n\(result.detailMessage)\n\nUpdate now?"
+            )
+            if shouldUpdate {
+                runAgentUpdate(source: result.source, manager: result.primaryManager, packageIdentifier: result.packageIdentifier)
+            }
+        case .builtInUpdaterAvailable:
+            let shouldUpdate = showUpdateConfirmationAlert(
+                title: "\(result.source.displayName): Built-in Updater",
+                message: "\(result.detailMessage)\n\nRun the built-in updater now?"
             )
             if shouldUpdate {
                 runAgentUpdate(source: result.source, manager: result.primaryManager, packageIdentifier: result.packageIdentifier)
@@ -1093,6 +1130,7 @@ struct PreferencesView: View {
 enum PreferencesTab: String, CaseIterable, Identifiable {
     case general
     case usageTracking
+    case limitAlerts
     case usageProbes
     case menuBar
     case unified
@@ -1120,6 +1158,7 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "General"
         case .usageTracking: return "Usage Tracking"
+        case .limitAlerts: return "Limit Alerts"
         case .usageProbes: return "Usage Probes"
         case .menuBar: return "Menu Bar"
         case .unified: return "Unified Window"
@@ -1128,7 +1167,7 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         case .codexCLI: return "Codex CLI"
         case .claudeResume: return "Claude Code"
         case .opencode: return "OpenCode"
-        case .geminiCLI: return "Gemini CLI"
+        case .geminiCLI: return "Antigravity CLI"
         case .hermesCLI: return "Hermes"
         case .copilotCLI: return "GitHub Copilot CLI"
         case .droidCLI: return "Droid"
@@ -1147,6 +1186,7 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape"
         case .usageTracking: return "chart.bar"
+        case .limitAlerts: return "bell.badge"
         case .usageProbes: return "wrench.and.screwdriver"
         case .menuBar: return "menubar.rectangle"
         case .unified: return "square.grid.2x2"
@@ -1155,7 +1195,7 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         case .codexCLI: return "terminal"
         case .claudeResume: return "c.square"
         case .opencode: return "chevron.left.slash.chevron.right"
-        case .geminiCLI: return "g.circle"
+        case .geminiCLI: return "sparkles"
         case .hermesCLI: return "brain"
         case .copilotCLI: return "bolt.horizontal.circle"
         case .droidCLI: return "d.circle"
@@ -1172,8 +1212,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
 }
 
 private extension PreferencesView {
-    // Sidebar order: General → Agent Cockpit → Unified Window → Usage Tracking → Usage Probes → Menu Bar → Advanced → About → Agents
-    var visibleTabs: [PreferencesTab] { [.general, .agentCockpit, .unified, .usageTracking, .usageProbes, .menuBar, .advanced, .about, .codexCLI, .claudeResume, .opencode, .geminiCLI, .copilotCLI, .cursor, .pi, .grok, .amp, .antigravity, .remote, .hermesCLI, .openClawCLI] }
+    // Sidebar order: General → Agent Cockpit → Unified Window → Usage Tracking → Limit Alerts → Usage Probes → Menu Bar → Advanced → About → Agents
+    var visibleTabs: [PreferencesTab] { [.general, .agentCockpit, .unified, .usageTracking, .limitAlerts, .usageProbes, .menuBar, .advanced, .about, .codexCLI, .claudeResume, .opencode, .geminiCLI, .copilotCLI, .cursor, .pi, .grok, .amp, .antigravity, .remote, .hermesCLI, .openClawCLI] }
 }
 
 // MARK: - Probe helpers
@@ -1439,7 +1479,7 @@ extension PreferencesView {
             if grokVersionString == nil && grokProbeState != .probing { probeGrok() }
         case .amp, .antigravity:
             break
-        case .menuBar, .usageProbes, .general, .unified, .advanced, .agentCockpit, .about, .remote:
+        case .menuBar, .limitAlerts, .usageProbes, .general, .unified, .advanced, .agentCockpit, .about, .remote:
             break
         }
     }
