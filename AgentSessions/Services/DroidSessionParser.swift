@@ -82,6 +82,16 @@ final class DroidSessionParser {
             ?? stringValue(obj, keys: ["session"])
     }
 
+    private static func sessionStoreTitle(from obj: [String: Any]) -> String? {
+        for key in ["title", "sessionTitle", "session_title"] {
+            if let value = stringValue(obj, keys: [key]) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return nil
+    }
+
     private static func messageText(_ obj: [String: Any]) -> String? {
         return stringValue(obj, keys: ["text", "content", "message"])
     }
@@ -207,7 +217,7 @@ final class DroidSessionParser {
 
                 if normalizedType(type) == "sessionstart" {
                     if sessionID == nil { sessionID = obj["id"] as? String }
-                    if title == nil { title = obj["title"] as? String }
+                    if title == nil { title = sessionStoreTitle(from: obj) }
                     if cwd == nil { cwd = obj["cwd"] as? String }
                     return true
                 }
@@ -268,7 +278,8 @@ final class DroidSessionParser {
             cwd: cwd,
             repoName: nil,
             lightweightTitle: title,
-            lightweightCommands: estimatedCommands
+            lightweightCommands: estimatedCommands,
+            customTitle: title
         )
     }
 
@@ -277,6 +288,7 @@ final class DroidSessionParser {
 
         var events: [SessionEvent] = []
         var sessionID: String? = forcedID
+        var title: String? = nil
         var cwd: String? = nil
         var tmin: Date? = nil
         var tmax: Date? = nil
@@ -295,6 +307,7 @@ final class DroidSessionParser {
 
                 if normalizedType(type) == "sessionstart" {
                     if sessionID == nil { sessionID = obj["id"] as? String }
+                    if title == nil { title = sessionStoreTitle(from: obj) }
                     if cwd == nil { cwd = obj["cwd"] as? String }
                     return
                 }
@@ -484,8 +497,9 @@ final class DroidSessionParser {
             events: events,
             cwd: cwd,
             repoName: nil,
-            lightweightTitle: nil,
-            lightweightCommands: events.filter { $0.kind == .tool_call }.count
+            lightweightTitle: title,
+            lightweightCommands: events.filter { $0.kind == .tool_call }.count,
+            customTitle: title
         )
     }
 
@@ -582,6 +596,7 @@ final class DroidSessionParser {
 
         var events: [SessionEvent] = []
         var sessionID: String? = forcedID
+        var title: String? = nil
         var model: String? = nil
         var cwd: String? = nil
         var tmin: Date? = nil
@@ -597,6 +612,13 @@ final class DroidSessionParser {
                 guard let obj = decodeObject(rawLine),
                       let typeRaw = obj["type"] as? String else { return }
                 let type = normalizedType(typeRaw)
+
+                if type == "sessionstart" {
+                    if sessionID == nil { sessionID = obj["id"] as? String }
+                    if title == nil { title = sessionStoreTitle(from: obj) }
+                    if cwd == nil { cwd = obj["cwd"] as? String }
+                    return
+                }
 
                 if sessionID == nil {
                     sessionID = sessionIDField(obj)
@@ -633,6 +655,11 @@ final class DroidSessionParser {
                     let text = messageText(obj)
                     let kind: SessionEventKind = (role == "user") ? .user : .assistant
                     if kind == .user, let text {
+                        if title == nil {
+                            let extracted = extractUserPromptFromSystemReminder(text)
+                            let trimmed = extracted.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { title = trimmed }
+                        }
                         let extracted = extractUserPromptFromSystemReminder(text)
                         let originalTrimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         let reminderTrimmed = extracted.reminder?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -835,7 +862,8 @@ final class DroidSessionParser {
             events: events,
             cwd: cwd,
             repoName: nil,
-            lightweightTitle: nil
+            lightweightTitle: title,
+            customTitle: title
         )
     }
 

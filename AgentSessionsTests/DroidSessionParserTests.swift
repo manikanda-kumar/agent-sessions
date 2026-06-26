@@ -36,6 +36,24 @@ final class DroidSessionParserTests: XCTestCase {
         XCTAssertTrue((result?.toolOutput ?? "").contains("exit code: 1"))
     }
 
+    func testSessionStoreFullPreservesSessionStartTitle() throws {
+        let lines = [
+            #"{"type":"session_start","id":"565d54c7-042d-4acd-ba04-790869ae00d9","title":"Oracle: Oracle review of system prompt changes","sessionTitle":"Oracle: Oracle review of system prompt changes","cwd":"/Users/manik/Github/fieldtheory-cli"}"#,
+            ##"{"type":"message","id":"m1","timestamp":"2026-06-21T10:17:26.084Z","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>context</system-reminder>"},{"type":"text","text":"# Task Tool Invocation - Subagent type: oracle"}]}}"##
+        ]
+        let url = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let preview = DroidSessionParser.parseFile(at: url) else { return XCTFail("preview parse returned nil") }
+        XCTAssertEqual(preview.lightweightTitle, "Oracle: Oracle review of system prompt changes")
+        XCTAssertEqual(preview.customTitle, "Oracle: Oracle review of system prompt changes")
+
+        guard let full = DroidSessionParser.parseFileFull(at: url) else { return XCTFail("full parse returned nil") }
+        XCTAssertEqual(full.title, "Oracle: Oracle review of system prompt changes")
+        XCTAssertEqual(full.listTitle, "Oracle: Oracle review of system prompt changes")
+        XCTAssertFalse(full.events.isEmpty)
+    }
+
     func testSessionStorePreviewCountsCommands() throws {
         let lines = [
             #"{"type":"session_start","id":"s1","title":"Test Droid","cwd":"/tmp"}"#,

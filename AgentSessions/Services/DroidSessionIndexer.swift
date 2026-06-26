@@ -309,8 +309,9 @@ final class DroidSessionIndexer: ObservableObject, SessionIndexerProtocol, @unch
                         events: parsed.events,
                         cwd: current.lightweightCwd ?? parsed.cwd,
                         repoName: current.repoName,
-                        lightweightTitle: current.lightweightTitle ?? parsed.lightweightTitle,
-                        lightweightCommands: current.lightweightCommands ?? parsed.lightweightCommands
+                        lightweightTitle: parsed.lightweightTitle ?? current.lightweightTitle,
+                        lightweightCommands: current.lightweightCommands ?? parsed.lightweightCommands,
+                        customTitle: parsed.customTitle ?? current.customTitle
                     )
                     self.allSessions[idx] = merged
 
