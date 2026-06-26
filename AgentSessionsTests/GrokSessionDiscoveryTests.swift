@@ -2,6 +2,10 @@ import XCTest
 @testable import AgentSessions
 
 final class GrokSessionDiscoveryTests: XCTestCase {
+    private func normalizedFixturePath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardized.path
+    }
+
     private func fixtureSessionsRoot() -> URL {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -20,7 +24,8 @@ final class GrokSessionDiscoveryTests: XCTestCase {
         let discovery = GrokSessionDiscovery(customRoot: fixtureSessionsRoot().path)
         let files = discovery.discoverSessionFiles()
         let expected = expectedFixtureChatHistory()
-        XCTAssertTrue(files.contains(expected), "Expected fixture chat history in unfiltered discovery")
+        let paths = Set(files.map { normalizedFixturePath($0) })
+        XCTAssertTrue(paths.contains(normalizedFixturePath(expected)), "Expected fixture chat history in unfiltered discovery")
     }
 
     func testDiscoverSessionFilesFindsFixtureWithProjectFilter() throws {
@@ -28,7 +33,7 @@ final class GrokSessionDiscoveryTests: XCTestCase {
         let files = discovery.discoverSessionFiles(cwdFilter: "/tmp/as-agent-fixture/project")
         let expected = expectedFixtureChatHistory()
         XCTAssertEqual(files.count, 1)
-        XCTAssertEqual(files.first, expected)
+        XCTAssertEqual(normalizedFixturePath(files.first!), normalizedFixturePath(expected))
     }
 
     func testScopedSessionsRootNarrowsToEncodedProjectDirectory() {

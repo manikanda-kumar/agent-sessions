@@ -2,6 +2,10 @@ import XCTest
 @testable import AgentSessions
 
 final class PiSessionDiscoveryTests: XCTestCase {
+    private func normalizedFixturePath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardized.path
+    }
+
     private func fixtureSessionsRoot() -> URL {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -19,7 +23,8 @@ final class PiSessionDiscoveryTests: XCTestCase {
         let discovery = PiSessionDiscovery(customRoot: fixtureSessionsRoot().path)
         let files = discovery.discoverSessionFiles()
         let expected = expectedFixtureSession()
-        XCTAssertTrue(files.contains(expected), "Expected fixture session in unfiltered discovery")
+        let paths = Set(files.map { normalizedFixturePath($0) })
+        XCTAssertTrue(paths.contains(normalizedFixturePath(expected)), "Expected fixture session in unfiltered discovery")
     }
 
     func testDiscoverSessionFilesFindsFixtureWithProjectFilter() throws {
@@ -27,6 +32,6 @@ final class PiSessionDiscoveryTests: XCTestCase {
         let files = discovery.discoverSessionFiles(cwdFilter: "/tmp/as-agent-fixture/project")
         let expected = expectedFixtureSession()
         XCTAssertEqual(files.count, 1)
-        XCTAssertEqual(files.first, expected)
+        XCTAssertEqual(normalizedFixturePath(files.first!), normalizedFixturePath(expected))
     }
 }
