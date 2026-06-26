@@ -3,28 +3,32 @@
     <channel>
         <title>AgentSessions</title>
         <item>
-            <title>3.9.1</title>
-            <pubDate>Fri, 05 Jun 2026 22:53:21 -0700</pubDate>
+            <title>3.9.3</title>
+            <pubDate>Fri, 12 Jun 2026 20:45:03 -0700</pubDate>
             <description><![CDATA[
-<h2>What&#x27;s New in 3.9.1</h2>
-<h3>Bug Fixes</h3>
+<h2>What&#x27;s New in 3.9.3</h2>
+<h3>Improvements</h3>
 <ul>
-<li>Menu bar: Kept the live status label visible instead of collapsing it to a generic stack icon when usage or session counts exceed a narrow width threshold.</li>
-<li>Menu bar: Hide Dock icon now launches as a UIElement-capable app and clears stale Dock recent-app entries when switching hidden, preventing macOS from leaving a visible Dock icon behind.</li>
+<li>Transcript toolbar: Markdown export now writes embedded session images into a sibling assets folder and references image attachments so exported transcripts keep visible images.</li>
+<li>Transcript toolbar: Markdown export now creates a human-readable document with session metadata, role sections, and collapsible tool details instead of dumping terminal/UI formatting.</li>
+<li>Transcript toolbar: Export now writes the selected session transcript in terminal mode instead of saving an empty Markdown file.</li>
+<li>Dock: Hide Dock icon can now rely on a pinned Agent Cockpit as the app&#x27;s reopen path, so hiding the Dock no longer forces the menu bar item on when Cockpit is pinned.</li>
+<li>Quota Meter: 5h run-out tokens now expire based on the last actual burn observation rather than passive refreshes, hide when the 5h reset will arrive before the projected run-out, Claude projections use fractional usage changes when available, Cockpit auto-expands when width fallback would otherwise hide an active projection, run-out tokens are easier to read in the Cockpit, and Limit Alerts diagnostics now show the current 5h projection and notification delivery state without leaving stale active ETAs behind.</li>
+<li>Settings: Standardized visible app copy on Settings instead of mixing Settings and Preferences labels.</li>
 </ul>
 <h3>Reminder: What You Got in 3.9</h3>
 <ul>
-<li>Limits Widget: Added a small always-on Codex and Claude usage window for MacBook users who want 5h and weekly limit visibility without spending menu bar space or opening the full Agent Cockpit.</li>
+<li>Quota Meter: Added a small always-on Codex and Claude usage window for MacBook users who want 5h and weekly limit visibility without spending menu bar space or opening the full Agent Cockpit.</li>
 <li>Usage Tracking: Added shared Codex and Claude limit notifications for approaching or exhausted 5h and weekly limits, with per-provider and per-warning controls plus a 5h reset alert.</li>
 <li>Unified Window: Added View menu commands to collapse or expand all visible session hierarchy groups.</li>
 <li>Unified Window: Added a persistent Transcript Window toggle so the transcript pane can be hidden for list-focused browsing.</li>
 </ul>
-<p>Full release notes: <a href="https://github.com/jazzyalex/agent-sessions/releases/tag/v3.9.1">https://github.com/jazzyalex/agent-sessions/releases/tag/v3.9.1</a></p>
+<p>Full release notes: <a href="https://github.com/jazzyalex/agent-sessions/releases/tag/v3.9.3">https://github.com/jazzyalex/agent-sessions/releases/tag/v3.9.3</a></p>
             ]]></description>
-            <sparkle:version>50</sparkle:version>
-            <sparkle:shortVersionString>3.9.1</sparkle:shortVersionString>
+            <sparkle:version>52</sparkle:version>
+            <sparkle:shortVersionString>3.9.3</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/jazzyalex/agent-sessions/releases/download/v3.9.1/AgentSessions-3.9.1.dmg" length="17934542" type="application/octet-stream" sparkle:edSignature="MDgTof0gCYBg2MZa6ZqPRqRTi1KdvzUG6U1RFSK9C67W4pkSxxfH5+G+WfThaUWZ28z2JwVoykeDIMDa4aNVDg=="/>
+            <enclosure url="https://github.com/jazzyalex/agent-sessions/releases/download/v3.9.3/AgentSessions-3.9.3.dmg" length="18241417" type="application/octet-stream" sparkle:edSignature="QeZY4xYQDrGwIaVAanwFmxzVxd+Mvtj4iXRixW+jdM8a0y2L9ny6V+kD2e5BNUhqh6yX+dco44gXAsqGN6WNDg=="/>
         </item>
     </channel>
 </rss>

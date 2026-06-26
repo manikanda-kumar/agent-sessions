@@ -13,6 +13,14 @@ final class ActivationPolicyDeciderTests: XCTestCase {
             .regular
         )
         XCTAssertEqual(
+            ActivationPolicyDecider.policy(
+                hideDockIcon: true,
+                menuBarEnabled: false,
+                pinnedCockpitAvailable: true
+            ),
+            .accessory
+        )
+        XCTAssertEqual(
             ActivationPolicyDecider.policy(hideDockIcon: false, menuBarEnabled: true),
             .regular
         )
@@ -20,6 +28,104 @@ final class ActivationPolicyDeciderTests: XCTestCase {
 
     func testAppBundleLaunchesAsUIElementCapableApp() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "LSUIElement") as? Bool, true)
+    }
+
+    func testDockIconPreferenceToggleEnablesMenuBarBeforeHidingDockIcon() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerTests")
+
+        XCTAssertEqual(DockIconPreferenceController.dockIconMenuTitle(defaults: defaults), "Hide Dock Icon")
+
+        let hidden = DockIconPreferenceController.toggleDockIconHidden(defaults: defaults)
+
+        XCTAssertTrue(hidden)
+        XCTAssertTrue(defaults.bool(forKey: PreferencesKey.menuBarEnabled))
+        XCTAssertTrue(defaults.bool(forKey: PreferencesKey.Advanced.hideDockIcon))
+        XCTAssertEqual(DockIconPreferenceController.dockIconMenuTitle(defaults: defaults), "Show Dock Icon")
+    }
+
+    func testDockIconPreferenceToggleUsesPinnedCockpitWithoutEnablingMenuBar() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerPinnedCockpitTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerPinnedCockpitTests")
+        defaults.set(true, forKey: PreferencesKey.Cockpit.codexActiveSessionsEnabled)
+        defaults.set(true, forKey: PreferencesKey.Cockpit.hudPinned)
+
+        let hidden = DockIconPreferenceController.toggleDockIconHidden(defaults: defaults)
+
+        XCTAssertTrue(hidden)
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.menuBarEnabled))
+        XCTAssertTrue(defaults.bool(forKey: PreferencesKey.Advanced.hideDockIcon))
+        XCTAssertTrue(DockIconPreferenceController.hasDockHiddenReachability(defaults: defaults))
+    }
+
+    func testDisablingMenuBarClearsHiddenDockPreference() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerMenuBarTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerMenuBarTests")
+        DockIconPreferenceController.setDockIconHidden(true, defaults: defaults)
+
+        DockIconPreferenceController.setMenuBarEnabled(false, defaults: defaults)
+
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.menuBarEnabled))
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.Advanced.hideDockIcon))
+        XCTAssertEqual(DockIconPreferenceController.dockIconMenuTitle(defaults: defaults), "Hide Dock Icon")
+    }
+
+    func testDisablingMenuBarPreservesHiddenDockPreferenceWhenPinnedCockpitIsAvailable() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerPinnedMenuBarTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerPinnedMenuBarTests")
+        defaults.set(true, forKey: PreferencesKey.Cockpit.codexActiveSessionsEnabled)
+        defaults.set(true, forKey: PreferencesKey.Cockpit.hudPinned)
+        defaults.set(true, forKey: PreferencesKey.menuBarEnabled)
+        defaults.set(true, forKey: PreferencesKey.Advanced.hideDockIcon)
+
+        DockIconPreferenceController.setMenuBarEnabled(false, defaults: defaults)
+
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.menuBarEnabled))
+        XCTAssertTrue(defaults.bool(forKey: PreferencesKey.Advanced.hideDockIcon))
+    }
+
+    func testReachabilityReconcileRestoresDockPathWithoutReenablingMenuBar() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerReconcileTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerReconcileTests")
+        defaults.set(false, forKey: PreferencesKey.menuBarEnabled)
+        defaults.set(true, forKey: PreferencesKey.Advanced.hideDockIcon)
+
+        DockIconPreferenceController.reconcileReachability(defaults: defaults)
+
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.menuBarEnabled))
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.Advanced.hideDockIcon))
+    }
+
+    func testReachabilityReconcilePreservesDockHiddenWhenPinnedCockpitIsAvailable() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerPinnedReconcileTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerPinnedReconcileTests")
+        defaults.set(false, forKey: PreferencesKey.menuBarEnabled)
+        defaults.set(true, forKey: PreferencesKey.Cockpit.codexActiveSessionsEnabled)
+        defaults.set(true, forKey: PreferencesKey.Cockpit.hudPinned)
+        defaults.set(true, forKey: PreferencesKey.Advanced.hideDockIcon)
+
+        DockIconPreferenceController.reconcileReachability(defaults: defaults)
+
+        XCTAssertFalse(defaults.bool(forKey: PreferencesKey.menuBarEnabled))
+        XCTAssertTrue(defaults.bool(forKey: PreferencesKey.Advanced.hideDockIcon))
+    }
+
+    func testPinnedCockpitReachabilityRequiresLiveSessionsEnabled() {
+        let defaults = UserDefaults(suiteName: "DockIconPreferenceControllerPinnedDisabledTests")!
+        defaults.removePersistentDomain(forName: "DockIconPreferenceControllerPinnedDisabledTests")
+        defaults.set(false, forKey: PreferencesKey.Cockpit.codexActiveSessionsEnabled)
+        defaults.set(true, forKey: PreferencesKey.Cockpit.hudPinned)
+
+        XCTAssertFalse(DockIconPreferenceController.isPinnedCockpitAvailable(defaults: defaults))
+        XCTAssertFalse(DockIconPreferenceController.hasDockHiddenReachability(defaults: defaults))
+    }
+
+    @MainActor
+    func testDockMenuAlwaysOffersHideDockIcon() {
+        let delegate = AgentSessionsApplicationDelegate()
+        let menu = delegate.applicationDockMenu(NSApplication.shared)
+
+        XCTAssertEqual(menu?.items.first?.title, "Hide Dock Icon")
     }
 
     func testDockRecentAppCleanerRemovesOnlyAgentSessionsEntries() {

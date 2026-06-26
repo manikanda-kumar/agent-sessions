@@ -22,6 +22,12 @@ public enum SessionSurface: String, Codable, Sendable {
 
 public typealias CodexSessionSurface = SessionSurface
 
+public enum SessionRelationshipKind: String, Codable, Sendable {
+    case root
+    case subagent
+    case sideChat
+}
+
 public struct Session: Identifiable, Equatable, Codable, Sendable {
     public let id: String
     public let source: SessionSource
@@ -55,7 +61,12 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
     // Subagent hierarchy
     public let parentSessionID: String?   // Raw ID of parent session (UUID for Claude/Codex, ses_ID for OpenCode)
     public let subagentType: String?      // e.g. "Explore", "review", "thread_spawn", "general"
-    public var isSubagent: Bool { parentSessionID != nil || subagentType != nil }
+    public let relationshipKind: SessionRelationshipKind?
+    public var effectiveRelationshipKind: SessionRelationshipKind {
+        relationshipKind ?? ((parentSessionID != nil || subagentType != nil) ? .subagent : .root)
+    }
+    public var isSubagent: Bool { effectiveRelationshipKind == .subagent }
+    public var isSideChat: Bool { effectiveRelationshipKind == .sideChat }
 
     // Runtime UI state (not persisted in session files)
     public var isFavorite: Bool = false
@@ -78,6 +89,7 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
                 codexInternalSessionIDHint: String? = nil,
                 parentSessionID: String? = nil,
                 subagentType: String? = nil,
+                relationshipKind: SessionRelationshipKind? = nil,
                 customTitle: String? = nil,
                 codexOriginator: String? = nil,
                 codexSource: String? = nil,
@@ -112,6 +124,7 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
         self.lightweightCommands = nil
         self.parentSessionID = parentSessionID
         self.subagentType = subagentType
+        self.relationshipKind = relationshipKind
         self.isFavorite = false
         self.deletedAt = deletedAt
     }
@@ -134,6 +147,7 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
                 codexInternalSessionIDHint: String? = nil,
                 parentSessionID: String? = nil,
                 subagentType: String? = nil,
+                relationshipKind: SessionRelationshipKind? = nil,
                 customTitle: String? = nil,
                 codexOriginator: String? = nil,
                 codexSource: String? = nil,
@@ -168,6 +182,7 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
         self.lightweightCommands = lightweightCommands
         self.parentSessionID = parentSessionID
         self.subagentType = subagentType
+        self.relationshipKind = relationshipKind
         self.isFavorite = false
         self.deletedAt = deletedAt
     }
@@ -196,11 +211,52 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
         case reasoningEffort
         case parentSessionID
         case subagentType
+        case relationshipKind
         case customTitle
         case deletedAt
         // isFavorite intentionally excluded (runtime only)
         // isHousekeeping intentionally excluded (derived at parse/index time)
         // isDeleted is a computed property (deletedAt != nil)
+    }
+
+    public static func == (lhs: Session, rhs: Session) -> Bool {
+        lhs.id == rhs.id &&
+            lhs.source == rhs.source &&
+            lhs.startTime == rhs.startTime &&
+            lhs.endTime == rhs.endTime &&
+            lhs.model == rhs.model &&
+            lhs.filePath == rhs.filePath &&
+            lhs.fileSizeBytes == rhs.fileSizeBytes &&
+            lhs.eventCount == rhs.eventCount &&
+            lhs.events.count == rhs.events.count &&
+            sameEventEdge(lhs.events.first, rhs.events.first) &&
+            sameEventEdge(lhs.events.last, rhs.events.last) &&
+            lhs.isHousekeeping == rhs.isHousekeeping &&
+            lhs.lightweightCommands == rhs.lightweightCommands &&
+            lhs.lightweightCwd == rhs.lightweightCwd &&
+            lhs.lightweightRepoName == rhs.lightweightRepoName &&
+            lhs.lightweightTitle == rhs.lightweightTitle &&
+            lhs.customTitle == rhs.customTitle &&
+            lhs.codexInternalSessionIDHint == rhs.codexInternalSessionIDHint &&
+            lhs.codexOriginator == rhs.codexOriginator &&
+            lhs.codexSource == rhs.codexSource &&
+            lhs.codexSurface == rhs.codexSurface &&
+            lhs.originator == rhs.originator &&
+            lhs.originSource == rhs.originSource &&
+            lhs.surface == rhs.surface &&
+            lhs.reasoningEffort == rhs.reasoningEffort &&
+            lhs.parentSessionID == rhs.parentSessionID &&
+            lhs.subagentType == rhs.subagentType &&
+            lhs.relationshipKind == rhs.relationshipKind &&
+            lhs.isFavorite == rhs.isFavorite &&
+            lhs.deletedAt == rhs.deletedAt
+    }
+
+    private static func sameEventEdge(_ lhs: SessionEvent?, _ rhs: SessionEvent?) -> Bool {
+        lhs?.id == rhs?.id &&
+            lhs?.timestamp == rhs?.timestamp &&
+            lhs?.kind == rhs?.kind &&
+            lhs?.role == rhs?.role
     }
 
     public var shortID: String { String(id.prefix(6)) }
@@ -258,15 +314,37 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
         if let light = lightweightTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !light.isEmpty {
             return light
         }
-        if let user = events.first(where: { $0.kind == .user })?.text?.collapsedWhitespace(), !user.isEmpty {
-            return user
+        var sawFirstUser = false
+        var firstAssistantIndex: Int?
+        var firstToolName: String?
+        for index in events.indices {
+            switch events[index].kind {
+            case .user:
+                guard !sawFirstUser else { continue }
+                sawFirstUser = true
+                if let user = events[index].text?.collapsedWhitespace(), !user.isEmpty {
+                    return user
+                }
+            case .assistant:
+                if firstAssistantIndex == nil {
+                    firstAssistantIndex = index
+                }
+            case .tool_call:
+                if firstToolName == nil,
+                   let toolName = events[index].toolName,
+                   !toolName.isEmpty {
+                    firstToolName = toolName
+                }
+            default:
+                break
+            }
         }
-        if let assistant = events.first(where: { $0.kind == .assistant })?.text?.collapsedWhitespace(), !assistant.isEmpty {
+        if let firstAssistantIndex,
+           let assistant = events[firstAssistantIndex].text?.collapsedWhitespace(),
+           !assistant.isEmpty {
             return assistant
         }
-        if let name = events.first(where: { $0.kind == .tool_call && ($0.toolName?.isEmpty == false) })?.toolName {
-            return name
-        }
+        if let firstToolName { return firstToolName }
         return "No prompt"
     }
 
@@ -548,8 +626,11 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
     public var cwd: String? {
         // Providers that persist cwd as lightweight metadata should keep using it
         // after full parse as well; transcript event scraping is not authoritative.
-        if (source == .gemini || source == .opencode || source == .copilot || source == .openclaw || source == .hermes),
+        if (source == .antigravity || source == .opencode || source == .copilot || source == .openclaw || source == .hermes),
            let lightCwd = lightweightCwd, !lightCwd.isEmpty {
+            return lightCwd
+        }
+        if isSideChat, let lightCwd = lightweightCwd, !lightCwd.isEmpty {
             return lightCwd
         }
         // 0) Claude sessions: use cwd extracted during parsing
@@ -609,10 +690,27 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
             return stored
         }
 
+        return repoNameFromCwd()
+    }
+
+    private func repoNameFromCwd() -> String? {
+        repoName(fromCwd: cwd)
+    }
+
+    private func repoNameFromLightweightCwd() -> String? {
+        repoName(fromCwd: lightweightCwdIfPresent)
+    }
+
+    fileprivate var lightweightCwdIfPresent: String? {
+        guard let value = lightweightCwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func repoName(fromCwd cwd: String?) -> String? {
         guard let cwd else { return nil }
-        // Avoid implicit filesystem probing here. This property is read per-row
-        // during startup/indexing and probing arbitrary cwd paths can trigger TCC prompts.
-        // Prefer lightweight metadata and path-based heuristics only.
         let url = URL(fileURLWithPath: cwd)
         let dirName = url.lastPathComponent
 
@@ -639,10 +737,44 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
     public var repoDisplay: String {
         repoName ?? (cwd != nil ? "Other" : "—")
     }
+
+    public var rowRepoName: String? {
+        if let override = CodexDesktopProjectClassifier.projectNameOverride(for: self) {
+            return override
+        }
+        if let override = ClaudeDesktopProjectClassifier.projectNameOverride(for: self) {
+            return override
+        }
+        if let normalized = ProjectPathNormalizer.normalizedProjectNameWithoutEventMetadata(for: self) {
+            return normalized
+        }
+        if ProjectPathNormalizer.shouldSuppressStoredProjectNameWithoutEventMetadata(for: self) {
+            return nil
+        }
+        if let stored = lightweightRepoName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !stored.isEmpty {
+            return stored
+        }
+        return repoNameFromLightweightCwd()
+    }
+
+    public var rowProjectWorktreeDisplayName: String? {
+        ProjectPathNormalizer.worktreeDisplayNameWithoutEventMetadata(for: self)
+    }
+
+    public var rowRepoDisplay: String {
+        rowRepoName ?? (lightweightCwdIfPresent != nil ? "Other" : "—")
+    }
     public var isWorktree: Bool { (cwd.flatMap { Self.gitInfo(from: $0)?.isWorktree }) ?? false }
     public var isSubmodule: Bool { (cwd.flatMap { Self.gitInfo(from: $0)?.isSubmodule }) ?? false }
 
-    public var nonMetaCount: Int { events.filter { $0.kind != .meta }.count }
+    public var nonMetaCount: Int {
+        var count = 0
+        for index in events.indices where events[index].kind != .meta {
+            count += 1
+        }
+        return count
+    }
 
     // Effective message count: use actual nonMetaCount when events loaded, otherwise eventCount estimate.
     // This must be stable: loading events should not cause a previously-visible session to disappear under
@@ -674,10 +806,14 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
     public var modifiedAt: Date {
         // Restored Codex sessions can keep an old rollout filename while receiving fresh
         // state/transcript updates, so sort by the newest known activity timestamp.
-        let filenameDate = source == .codex ? codexFilenameTimestamp : nil
-        let candidates = [endTime, startTime, filenameDate].compactMap { $0 }
-
-        return candidates.max() ?? .distantPast
+        var latest = endTime ?? startTime ?? .distantPast
+        if let startTime, startTime > latest {
+            latest = startTime
+        }
+        if source == .codex, let filenameDate = codexFilenameTimestamp, filenameDate > latest {
+            latest = filenameDate
+        }
+        return latest
     }
 
     // Best-effort git branch detection
@@ -993,8 +1129,23 @@ enum ProjectPathNormalizer {
         return worktree
     }
 
+    static func normalizedProjectNameWithoutEventMetadata(for session: Session) -> String? {
+        guard case let .name(name, _) = resolveWithoutEventMetadata(for: session) else { return nil }
+        return name
+    }
+
+    static func worktreeDisplayNameWithoutEventMetadata(for session: Session) -> String? {
+        guard case let .name(_, worktree) = resolveWithoutEventMetadata(for: session) else { return nil }
+        return worktree
+    }
+
     static func shouldSuppressStoredProjectName(for session: Session) -> Bool {
         guard case .suppress = resolve(for: session) else { return false }
+        return true
+    }
+
+    static func shouldSuppressStoredProjectNameWithoutEventMetadata(for session: Session) -> Bool {
+        guard case .suppress = resolveWithoutEventMetadata(for: session) else { return false }
         return true
     }
 
@@ -1005,6 +1156,16 @@ enum ProjectPathNormalizer {
             storedProjectName: session.lightweightRepoName,
             gitRepositoryURL: session.gitRepositoryURL,
             gitBranch: session.gitBranch
+        )
+    }
+
+    private static func resolveWithoutEventMetadata(for session: Session) -> Resolution? {
+        resolve(
+            cwd: session.lightweightCwdIfPresent,
+            usesDesktopWorktreeHeuristics: session.isCodexDesktopSession || session.isClaudeDesktopSession,
+            storedProjectName: session.lightweightRepoName,
+            gitRepositoryURL: nil,
+            gitBranch: nil
         )
     }
 

@@ -18,33 +18,34 @@ struct GeminiResumeResult {
     let command: String?
 }
 
-/// Extracts the Gemini CLI session UUID from the session's JSON file.
-/// Session.id for Gemini is a sha256 hash of the file path (used for UI stability),
-/// not the CLI sessionId that `gemini --resume` expects.
-///
-/// Performs a bounded regex scan (up to 64 KB) for the top-level `sessionId` or
-/// `session_id` keys only — the generic `id` key is excluded to avoid capturing
-/// nested message IDs. Falls back to a small JSON parse of the file head if
-/// the regex doesn't match.
+/// Extracts the Antigravity CLI conversation ID from the local artifact path.
+/// Antigravity brain artifacts live under
+/// `~/.gemini/antigravity/brain/<conversation-id>/*.md`.
 enum GeminiSessionIDHelper {
-    private static let scanLimit = 65_536
-    // Match any non-empty string value for sessionId/session_id (not just UUIDs)
-    private static let pattern = try! NSRegularExpression(
-        pattern: #""(?:sessionId|session_id)"\s*:\s*"([^"]+)""#
-    )
+    static func artifactID(fromArtifactURL url: URL) -> String? {
+        guard let conversationID = conversationID(fromArtifactURL: url) else { return nil }
+        let artifact = url.deletingPathExtension().lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !artifact.isEmpty else { return conversationID }
+        return "\(conversationID)#\(artifact)"
+    }
+
+    static func conversationID(fromArtifactURL url: URL) -> String? {
+        let id = url.deletingLastPathComponent().lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return id.isEmpty ? nil : id
+    }
 
     static func deriveSessionID(from session: Session) -> String? {
-        let path = session.filePath
-        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { fh.closeFile() }
-        let data = fh.readData(ofLength: scanLimit)
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        let range = NSRange(text.startIndex..., in: text)
-        if let match = pattern.firstMatch(in: text, range: range),
-           let idRange = Range(match.range(at: 1), in: text) {
-            let sid = String(text[idRange])
-            if !sid.isEmpty { return sid }
+        let url = URL(fileURLWithPath: session.filePath)
+        if let id = conversationID(fromArtifactURL: url) {
+            return id
         }
-        return nil
+
+        let trimmed = session.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let separator = trimmed.firstIndex(of: "#") {
+            let prefix = String(trimmed[..<separator])
+            return prefix.isEmpty ? nil : prefix
+        }
+        return trimmed
     }
 }

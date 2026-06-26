@@ -1156,7 +1156,7 @@ final class UnifiedSessionIndexer: ObservableObject {
 
                 if self.showFavoritesOnly { results = results.filter { $0.isFavorite } }
                 if self.hideZeroMessageSessionsPref { results = results.filter { $0.messageCount > 0 || CursorSessionIndexer.isDBOnlySession($0) } }
-                if self.hideLowMessageSessionsPref { results = results.filter { $0.messageCount == 0 || $0.messageCount > 2 || CursorSessionIndexer.isDBOnlySession($0) } }
+                if self.hideLowMessageSessionsPref { results = results.filter { Self.passesLowMessageVisibilityFilter($0) } }
                 if !self.showHousekeepingSessionsPref { results = results.filter { !$0.isHousekeeping } }
 
                 // Apply sort descriptor (now included in pipeline so changes trigger background re-sort)
@@ -2560,6 +2560,15 @@ final class UnifiedSessionIndexer: ObservableObject {
         result.favoritesVersion == currentFavoritesVersion
     }
 
+    static func passesLowMessageVisibilityFilter(_ session: Session) -> Bool {
+        if session.source == .opencode { return true }
+        if session.source == .gemini { return true }
+        if session.source == .antigravity { return true }
+        if session.isSideChat { return true }
+        if CursorSessionIndexer.isDBOnlySession(session) { return true }
+        return session.messageCount == 0 || session.messageCount > 2
+    }
+
     private func bumpFavoritesSnapshotVersion() {
         favoritesSnapshotVersion &+= 1
         favoritesAggregationVersion.send(favoritesSnapshotVersion)
@@ -2636,11 +2645,7 @@ final class UnifiedSessionIndexer: ObservableObject {
             }
         }
         if hideLowMessageSessionsPref {
-            results = results.filter { s in
-                if s.source == .opencode { return true }
-                if CursorSessionIndexer.isDBOnlySession(s) { return true }
-                return s.messageCount == 0 || s.messageCount > 2
-            }
+            results = results.filter { Self.passesLowMessageVisibilityFilter($0) }
         }
 
         // Apply sort

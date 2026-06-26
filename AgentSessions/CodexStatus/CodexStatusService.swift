@@ -17,7 +17,7 @@ import IOKit.ps
 //    - Scans ~/.codex/sessions/YYYY/MM/DD/*.jsonl files for rate_limit events
 //    - Extracts 5-hour and weekly limit percentages from log events
 //    - Zero token cost (reads existing logs, no API calls)
-//    - Frequency: Every 5 minutes (reduced on battery)
+//    - Frequency: Every 60 seconds while visible (3-minute ceiling on battery/background)
 //    - Limitation: Only reflects usage from recent local Codex sessions
 //
 // 2. **SECONDARY: Auto /status Probe** (Active, 1-2 messages)
@@ -159,9 +159,12 @@ final class CodexUsageModel: ObservableObject {
     @Published var lastTotalTokens: Int? = nil
     @Published var isUpdating: Bool = false
     @Published var lastSuccessAt: Date? = nil
+    @Published var fiveHourProjectedRunoutAt: Date? = nil
+    @Published var fiveHourProjectionObservedAt: Date? = nil
 
     private var service: CodexStatusService?
     private let limitNotifier = UsageLimitNotifier.shared
+    private var fiveHourProjectionTracker = UsageLimitProjectionTracker()
     private var isEnabled: Bool = false
     private var stripVisible: Bool = false
     private var menuVisible: Bool = false
@@ -170,6 +173,19 @@ final class CodexUsageModel: ObservableObject {
     // Avoid touching NSApp during singleton initialization at app launch.
     // NSApp is an IUO and can be nil this early in startup.
     private var appIsActive: Bool = false
+
+#if DEBUG
+    static var projectionDiagnosticsDefaultsForTesting: UserDefaults?
+#endif
+
+    private static var projectionDiagnosticsDefaults: UserDefaults {
+#if DEBUG
+        if let projectionDiagnosticsDefaultsForTesting {
+            return projectionDiagnosticsDefaultsForTesting
+        }
+#endif
+        return .standard
+    }
 
     func setEnabled(_ enabled: Bool) {
         if AppRuntime.isRunningTests {
@@ -376,9 +392,23 @@ final class CodexUsageModel: ObservableObject {
             await service?.stop()
         }
         service = nil
+        fiveHourProjectionTracker.reset()
+        fiveHourProjectedRunoutAt = nil
+        fiveHourProjectionObservedAt = nil
+        Self.recordProjectionDiagnostics(fiveHourProjectionTracker.lastDiagnostics, estimate: nil, provider: .codex)
     }
 
+#if DEBUG
+    func applySnapshotForTesting(_ snapshot: CodexUsageSnapshot) {
+        apply(snapshot)
+    }
+#endif
+
     private func apply(_ s: CodexUsageSnapshot) {
+        let now = Date()
+        let observedAt = s.eventTimestamp ?? now
+        let fiveHourFreshness = Self.alertFreshness(source: s.fiveHourLimitsSource, eventTimestamp: s.eventTimestamp, now: now)
+        let weeklyFreshness = Self.alertFreshness(source: s.weekLimitsSource, eventTimestamp: s.eventTimestamp, now: now)
         fiveHourRemainingPercent = clampPercent(s.fiveHourRemainingPercent)
         weekRemainingPercent = clampPercent(s.weekRemainingPercent)
         fiveHourResetText = s.fiveHourResetText
@@ -387,13 +417,24 @@ final class CodexUsageModel: ObservableObject {
         usageLine = s.usageLine
         accountLine = s.accountLine
         modelLine = s.modelLine
-        lastUpdate = Date()
+        lastUpdate = now
         lastEventTimestamp = s.eventTimestamp
         lastInputTokens = s.lastInputTokens
         lastCachedInputTokens = s.lastCachedInputTokens
         lastOutputTokens = s.lastOutputTokens
         lastReasoningOutputTokens = s.lastReasoningOutputTokens
         lastTotalTokens = s.lastTotalTokens
+        let projectionEstimate = fiveHourProjectionTracker.update(with: UsageLimitProjectionSample(
+            source: .codex,
+            remainingPercent: s.fiveHourRemainingPercent,
+            resetText: s.fiveHourResetText,
+            hasRateLimit: s.hasFiveHourRateLimit,
+            freshness: fiveHourFreshness,
+            observedAt: observedAt
+        ), now: now)
+        fiveHourProjectedRunoutAt = projectionEstimate?.runoutAt
+        fiveHourProjectionObservedAt = projectionEstimate?.observedAt
+        Self.recordProjectionDiagnostics(fiveHourProjectionTracker.lastDiagnostics, estimate: projectionEstimate, provider: .codex)
         limitNotifier.handle(snapshot: UsageLimitSnapshot(
             provider: .codex,
             fiveHourRemainingPercent: s.fiveHourRemainingPercent,
@@ -401,10 +442,53 @@ final class CodexUsageModel: ObservableObject {
             hasFiveHourRateLimit: s.hasFiveHourRateLimit,
             weeklyRemainingPercent: s.weekRemainingPercent,
             weeklyResetText: s.weekResetText,
-            hasWeeklyRateLimit: s.hasWeekRateLimit
+            hasWeeklyRateLimit: s.hasWeekRateLimit,
+            fiveHourFreshness: fiveHourFreshness,
+            weeklyFreshness: weeklyFreshness,
+            observedAt: observedAt,
+            sourceDescription: s.limitsSource?.displayName,
+            fiveHourSourceDescription: s.fiveHourLimitsSource?.displayName,
+            weeklySourceDescription: s.weekLimitsSource?.displayName
         ))
         // Any snapshot means we received data; clear updating if set
         if isUpdating { isUpdating = false }
+    }
+
+    private static func alertFreshness(source: CodexLimitsSource?, eventTimestamp: Date?, now: Date = Date()) -> UsageLimitAlertFreshness {
+        switch source {
+        case .oauth, .cliRPC, .statusProbe:
+            return .fresh
+        case .jsonlFallback:
+            guard let eventTimestamp else { return .stale }
+            let age = now.timeIntervalSince(eventTimestamp)
+            if age <= 3 * 60 { return .fresh }
+            if age <= 10 * 60 { return .recentCached }
+            return .stale
+        case nil:
+            return .stale
+        }
+    }
+
+    private static func recordProjectionDiagnostics(_ value: String,
+                                                    estimate: UsageLimitProjectionEstimate?,
+                                                    provider: UsageLimitAlertProvider) {
+        let defaults = projectionDiagnosticsDefaults
+        let textKey: String
+        let runoutKey: String
+        let observedKey: String
+        switch provider {
+        case .codex:
+            textKey = PreferencesKey.usageLimitDiagnosticsCodexProjection
+            runoutKey = PreferencesKey.usageLimitDiagnosticsCodexProjectionRunoutAt
+            observedKey = PreferencesKey.usageLimitDiagnosticsCodexProjectionObservedAt
+        case .claude:
+            textKey = PreferencesKey.usageLimitDiagnosticsClaudeProjection
+            runoutKey = PreferencesKey.usageLimitDiagnosticsClaudeProjectionRunoutAt
+            observedKey = PreferencesKey.usageLimitDiagnosticsClaudeProjectionObservedAt
+        }
+        defaults.set(value, forKey: textKey)
+        defaults.set(estimate?.runoutAt.timeIntervalSince1970 ?? 0, forKey: runoutKey)
+        defaults.set(estimate?.observedAt.timeIntervalSince1970 ?? 0, forKey: observedKey)
     }
 
 }
@@ -431,11 +515,79 @@ enum UsageLimitAlertProvider: String {
 struct UsageLimitSnapshot: Equatable {
     let provider: UsageLimitAlertProvider
     let fiveHourRemainingPercent: Int
+    let fiveHourRemainingPercentExact: Double?
     let fiveHourResetText: String
     let hasFiveHourRateLimit: Bool
     let weeklyRemainingPercent: Int
+    let weeklyRemainingPercentExact: Double?
     let weeklyResetText: String
     let hasWeeklyRateLimit: Bool
+    let fiveHourFreshness: UsageLimitAlertFreshness
+    let weeklyFreshness: UsageLimitAlertFreshness
+    let observedAt: Date?
+    let sourceDescription: String?
+    let fiveHourSourceDescription: String?
+    let weeklySourceDescription: String?
+
+    init(provider: UsageLimitAlertProvider,
+         fiveHourRemainingPercent: Int,
+         fiveHourRemainingPercentExact: Double? = nil,
+         fiveHourResetText: String,
+         hasFiveHourRateLimit: Bool,
+         weeklyRemainingPercent: Int,
+         weeklyRemainingPercentExact: Double? = nil,
+         weeklyResetText: String,
+         hasWeeklyRateLimit: Bool,
+         freshness: UsageLimitAlertFreshness = .fresh,
+         fiveHourFreshness: UsageLimitAlertFreshness? = nil,
+         weeklyFreshness: UsageLimitAlertFreshness? = nil,
+         observedAt: Date? = nil,
+         sourceDescription: String? = nil,
+         fiveHourSourceDescription: String? = nil,
+         weeklySourceDescription: String? = nil) {
+        self.provider = provider
+        self.fiveHourRemainingPercent = fiveHourRemainingPercent
+        self.fiveHourRemainingPercentExact = fiveHourRemainingPercentExact
+        self.fiveHourResetText = fiveHourResetText
+        self.hasFiveHourRateLimit = hasFiveHourRateLimit
+        self.weeklyRemainingPercent = weeklyRemainingPercent
+        self.weeklyRemainingPercentExact = weeklyRemainingPercentExact
+        self.weeklyResetText = weeklyResetText
+        self.hasWeeklyRateLimit = hasWeeklyRateLimit
+        self.fiveHourFreshness = fiveHourFreshness ?? freshness
+        self.weeklyFreshness = weeklyFreshness ?? freshness
+        self.observedAt = observedAt
+        self.sourceDescription = sourceDescription
+        self.fiveHourSourceDescription = fiveHourSourceDescription ?? sourceDescription
+        self.weeklySourceDescription = weeklySourceDescription ?? sourceDescription
+    }
+}
+
+enum UsageLimitAlertFreshness: Equatable {
+    case fresh
+    case recentCached
+    case stale
+
+    var allowsImmediateAlerts: Bool {
+        self != .stale
+    }
+
+    /// Display-only burn projections can use recent cache; notification projections remain fresh-only.
+    var allowsProjectedDisplay: Bool {
+        self != .stale
+    }
+
+    var allowsProjectedAlerts: Bool {
+        self == .fresh
+    }
+
+    var diagnosticsLabel: String {
+        switch self {
+        case .fresh: return "fresh"
+        case .recentCached: return "recent cache"
+        case .stale: return "stale"
+        }
+    }
 }
 
 enum UsageLimitAlertWindow: String {
@@ -452,6 +604,7 @@ enum UsageLimitAlertWindow: String {
 
 enum UsageLimitAlertKind {
     case approaching
+    case projectedExhaustion
     case exhausted
     case resetComplete
 }
@@ -463,11 +616,30 @@ struct UsageLimitAlertEvent: Equatable {
     let remainingPercent: Int
     let resetDate: Date?
     let identifier: String
+    let projectedSecondsUntilEmpty: TimeInterval?
+
+    init(provider: UsageLimitAlertProvider,
+         kind: UsageLimitAlertKind,
+         window: UsageLimitAlertWindow,
+         remainingPercent: Int,
+         resetDate: Date?,
+         identifier: String,
+         projectedSecondsUntilEmpty: TimeInterval? = nil) {
+        self.provider = provider
+        self.kind = kind
+        self.window = window
+        self.remainingPercent = remainingPercent
+        self.resetDate = resetDate
+        self.identifier = identifier
+        self.projectedSecondsUntilEmpty = projectedSecondsUntilEmpty
+    }
 
     var title: String {
         switch kind {
         case .approaching:
-            return "\(provider.title) \(window.title) limit is low"
+            return "\(provider.title) \(window.title) usage is low"
+        case .projectedExhaustion:
+            return "\(provider.title) \(window.title) usage is burning fast"
         case .exhausted:
             return "\(provider.title) \(window.title) limit is exhausted"
         case .resetComplete:
@@ -478,18 +650,207 @@ struct UsageLimitAlertEvent: Equatable {
     var body: String {
         switch kind {
         case .approaching:
-            return "\(remainingPercent)% remaining before the \(window.title) limit."
+            return Self.limitPressureBody(
+                remainingPercent: remainingPercent,
+                window: window,
+                resetDate: resetDate,
+                projectedSecondsUntilEmpty: projectedSecondsUntilEmpty
+            )
+        case .projectedExhaustion:
+            return Self.limitPressureBody(
+                remainingPercent: remainingPercent,
+                window: window,
+                resetDate: resetDate,
+                projectedSecondsUntilEmpty: projectedSecondsUntilEmpty
+            )
         case .exhausted:
-            return "The \(window.title) limit has reached 0% remaining."
+            if let resetText = Self.formatResetETA(resetDate) {
+                return "0% remaining. Reset \(resetText)."
+            }
+            return "0% remaining."
         case .resetComplete:
             return "The 5h limit window has reset."
         }
+    }
+
+    private static func limitPressureBody(remainingPercent: Int,
+                                          window: UsageLimitAlertWindow,
+                                          resetDate: Date?,
+                                          projectedSecondsUntilEmpty: TimeInterval?) -> String {
+        var parts = ["\(remainingPercent)% remaining"]
+        if let projectedSecondsUntilEmpty {
+            parts.append("burning to empty in \(formatProjectionETA(projectedSecondsUntilEmpty))")
+        } else {
+            parts.append("for the \(window.title) limit")
+        }
+        if let resetText = formatResetETA(resetDate) {
+            parts.append("reset \(resetText)")
+        }
+        return parts.joined(separator: ", ") + "."
+    }
+
+    private static func formatResetETA(_ resetDate: Date?) -> String? {
+        guard let resetDate else { return nil }
+        let seconds = resetDate.timeIntervalSince(Date())
+        guard seconds > 0 else { return nil }
+        return "in \(formatDuration(seconds))"
+    }
+
+    private static func formatProjectionETA(_ seconds: TimeInterval) -> String {
+        "about \(formatDuration(seconds))"
+    }
+
+    private static func formatDuration(_ seconds: TimeInterval) -> String {
+        let minutes = max(1, Int(ceil(seconds / 60)))
+        let days = minutes / (24 * 60)
+        if days > 0 {
+            let hours = (minutes % (24 * 60)) / 60
+            if hours == 0 { return "\(days)d" }
+            return "\(days)d \(hours)h"
+        }
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        if remainingMinutes == 0 {
+            return "\(hours)h"
+        }
+        return "\(hours)h \(remainingMinutes)m"
+    }
+}
+
+struct UsageLimitAlertDiagnosticsStore {
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func recordSnapshot(_ snapshot: UsageLimitSnapshot, now: Date = Date()) {
+        defaults.set(sourceSummary(for: snapshot), forKey: keys(for: snapshot.provider).source)
+        defaults.set(freshnessSummary(for: snapshot), forKey: keys(for: snapshot.provider).freshness)
+        defaults.set((snapshot.observedAt ?? now).timeIntervalSince1970, forKey: keys(for: snapshot.provider).observedAt)
+    }
+
+    func recordImmediateAlert(_ event: UsageLimitAlertEvent, now: Date = Date()) {
+        defaults.set(alertSummary(for: event), forKey: keys(for: event.provider).lastAlertSummary)
+        defaults.set(now.timeIntervalSince1970, forKey: keys(for: event.provider).lastAlertAt)
+    }
+
+    func recordDelivery(_ summary: String, provider: UsageLimitAlertProvider, now: Date = Date()) {
+        defaults.set(summary, forKey: keys(for: provider).delivery)
+        defaults.set(now.timeIntervalSince1970, forKey: keys(for: provider).deliveryAt)
+    }
+
+    func recordScheduledReset(_ event: UsageLimitAlertEvent) {
+        guard let resetDate = event.resetDate else {
+            clearScheduledReset(provider: event.provider)
+            return
+        }
+        defaults.set(resetDate.timeIntervalSince1970, forKey: keys(for: event.provider).nextResetReminderAt)
+    }
+
+    func clearScheduledReset(provider: UsageLimitAlertProvider) {
+        defaults.removeObject(forKey: keys(for: provider).nextResetReminderAt)
+    }
+
+    private func sourceSummary(for snapshot: UsageLimitSnapshot) -> String {
+        let fiveHour = clean(snapshot.fiveHourSourceDescription) ?? "none"
+        let weekly = clean(snapshot.weeklySourceDescription) ?? "none"
+        if fiveHour == weekly { return fiveHour }
+        return "5h \(fiveHour) / Wk \(weekly)"
+    }
+
+    private func freshnessSummary(for snapshot: UsageLimitSnapshot) -> String {
+        let fiveHour = snapshot.fiveHourFreshness.diagnosticsLabel
+        let weekly = snapshot.weeklyFreshness.diagnosticsLabel
+        if fiveHour == weekly { return fiveHour }
+        return "5h \(fiveHour) / Wk \(weekly)"
+    }
+
+    private func alertSummary(for event: UsageLimitAlertEvent) -> String {
+        switch event.kind {
+        case .approaching:
+            if let seconds = event.projectedSecondsUntilEmpty {
+                return "\(event.window.title) low, \(event.remainingPercent)% left, empty in \(Self.formatDuration(seconds))"
+            }
+            return "\(event.window.title) low, \(event.remainingPercent)% left"
+        case .projectedExhaustion:
+            if let seconds = event.projectedSecondsUntilEmpty {
+                return "\(event.window.title) projected empty in \(Self.formatDuration(seconds)), \(event.remainingPercent)% left"
+            }
+            return "\(event.window.title) projected empty, \(event.remainingPercent)% left"
+        case .exhausted:
+            return "\(event.window.title) exhausted"
+        case .resetComplete:
+            return "5h reset complete"
+        }
+    }
+
+    private static func formatDuration(_ seconds: TimeInterval) -> String {
+        let minutes = max(1, Int(ceil(seconds / 60)))
+        let days = minutes / (24 * 60)
+        if days > 0 {
+            let hours = (minutes % (24 * 60)) / 60
+            if hours == 0 { return "\(days)d" }
+            return "\(days)d \(hours)h"
+        }
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        if remainingMinutes == 0 { return "\(hours)h" }
+        return "\(hours)h \(remainingMinutes)m"
+    }
+
+    private func clean(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func keys(for provider: UsageLimitAlertProvider) -> Keys {
+        switch provider {
+        case .codex:
+            return Keys(
+                source: PreferencesKey.usageLimitDiagnosticsCodexSource,
+                freshness: PreferencesKey.usageLimitDiagnosticsCodexFreshness,
+                observedAt: PreferencesKey.usageLimitDiagnosticsCodexObservedAt,
+                lastAlertSummary: PreferencesKey.usageLimitDiagnosticsCodexLastAlertSummary,
+                lastAlertAt: PreferencesKey.usageLimitDiagnosticsCodexLastAlertAt,
+                delivery: PreferencesKey.usageLimitDiagnosticsCodexDelivery,
+                deliveryAt: PreferencesKey.usageLimitDiagnosticsCodexDeliveryAt,
+                nextResetReminderAt: PreferencesKey.usageLimitDiagnosticsCodexNextResetReminderAt
+            )
+        case .claude:
+            return Keys(
+                source: PreferencesKey.usageLimitDiagnosticsClaudeSource,
+                freshness: PreferencesKey.usageLimitDiagnosticsClaudeFreshness,
+                observedAt: PreferencesKey.usageLimitDiagnosticsClaudeObservedAt,
+                lastAlertSummary: PreferencesKey.usageLimitDiagnosticsClaudeLastAlertSummary,
+                lastAlertAt: PreferencesKey.usageLimitDiagnosticsClaudeLastAlertAt,
+                delivery: PreferencesKey.usageLimitDiagnosticsClaudeDelivery,
+                deliveryAt: PreferencesKey.usageLimitDiagnosticsClaudeDeliveryAt,
+                nextResetReminderAt: PreferencesKey.usageLimitDiagnosticsClaudeNextResetReminderAt
+            )
+        }
+    }
+
+    private struct Keys {
+        let source: String
+        let freshness: String
+        let observedAt: String
+        let lastAlertSummary: String
+        let lastAlertAt: String
+        let delivery: String
+        let deliveryAt: String
+        let nextResetReminderAt: String
     }
 }
 
 final class UsageLimitAlertEvaluator {
     private var previousSnapshots: [UsageLimitAlertProvider: UsageLimitSnapshot] = [:]
     private let defaults: UserDefaults
+    private var previousSnapshotTimes: [UsageLimitAlertProvider: Date] = [:]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -498,16 +859,26 @@ final class UsageLimitAlertEvaluator {
     func evaluate(snapshot: UsageLimitSnapshot, now: Date = Date()) -> [UsageLimitAlertEvent] {
         guard alertsEnabled, providerEnabled(snapshot.provider) else {
             previousSnapshots[snapshot.provider] = snapshot
+            previousSnapshotTimes[snapshot.provider] = snapshot.observedAt ?? now
             return []
         }
 
         var events: [UsageLimitAlertEvent] = []
+        let previous = previousSnapshots[snapshot.provider]
+        let previousTime = previous?.observedAt ?? previousSnapshotTimes[snapshot.provider]
+        let currentTime = snapshot.observedAt ?? now
+        events.append(contentsOf: projectedExhaustionEvents(snapshot: snapshot, now: now))
         events.append(contentsOf: pressureEvents(
             window: .fiveHour,
             provider: snapshot.provider,
             remainingPercent: snapshot.fiveHourRemainingPercent,
             resetText: snapshot.fiveHourResetText,
             hasRateLimit: snapshot.hasFiveHourRateLimit,
+            freshness: snapshot.fiveHourFreshness,
+            previousRemainingPercent: previous?.fiveHourRemainingPercent,
+            previousFreshness: previous?.fiveHourFreshness,
+            previousTime: previousTime,
+            currentTime: currentTime,
             now: now
         ))
         events.append(contentsOf: pressureEvents(
@@ -516,6 +887,11 @@ final class UsageLimitAlertEvaluator {
             remainingPercent: snapshot.weeklyRemainingPercent,
             resetText: snapshot.weeklyResetText,
             hasRateLimit: snapshot.hasWeeklyRateLimit,
+            freshness: snapshot.weeklyFreshness,
+            previousRemainingPercent: previous?.weeklyRemainingPercent,
+            previousFreshness: previous?.weeklyFreshness,
+            previousTime: previousTime,
+            currentTime: currentTime,
             now: now
         ))
 
@@ -524,6 +900,7 @@ final class UsageLimitAlertEvaluator {
         }
 
         previousSnapshots[snapshot.provider] = snapshot
+        previousSnapshotTimes[snapshot.provider] = snapshot.observedAt ?? now
         return events
     }
 
@@ -531,6 +908,7 @@ final class UsageLimitAlertEvaluator {
         guard alertsEnabled,
               providerEnabled(snapshot.provider),
               resetCompleteEnabled,
+              snapshot.fiveHourFreshness.allowsImmediateAlerts,
               snapshot.hasFiveHourRateLimit,
               let resetDate = UsageResetText.resetDate(kind: "5h", source: snapshot.provider.resetSource, raw: snapshot.fiveHourResetText, now: now),
               resetDate.timeIntervalSince(now) > 1 else {
@@ -567,6 +945,13 @@ final class UsageLimitAlertEvaluator {
         defaults.object(forKey: PreferencesKey.usageLimitNotificationApproachingEnabled) as? Bool ?? true
     }
 
+    private var projectedEnabled: Bool {
+        if let value = defaults.object(forKey: PreferencesKey.usageLimitNotificationProjectedEnabled) as? Bool {
+            return value
+        }
+        return approachingEnabled
+    }
+
     private var exhaustedEnabled: Bool {
         defaults.object(forKey: PreferencesKey.usageLimitNotificationExhaustedEnabled) as? Bool ?? true
     }
@@ -582,17 +967,151 @@ final class UsageLimitAlertEvaluator {
         return min(max(stored, 1), 50)
     }
 
+    private var predictionHorizonSeconds: TimeInterval { 60 * 60 }
+
+    private func projectedExhaustionEvents(snapshot: UsageLimitSnapshot, now: Date) -> [UsageLimitAlertEvent] {
+        guard projectedEnabled,
+              let previous = previousSnapshots[snapshot.provider],
+              let previousTime = previous.observedAt ?? previousSnapshotTimes[snapshot.provider] else {
+            return []
+        }
+        let currentTime = snapshot.observedAt ?? now
+
+        return [
+            projectedExhaustionEvent(
+                window: .fiveHour,
+                provider: snapshot.provider,
+                previousRemainingPercent: previous.fiveHourRemainingPercent,
+                previousRemainingPercentExact: previous.fiveHourRemainingPercentExact,
+                currentRemainingPercent: snapshot.fiveHourRemainingPercent,
+                currentRemainingPercentExact: snapshot.fiveHourRemainingPercentExact,
+                resetText: snapshot.fiveHourResetText,
+                hasRateLimit: snapshot.hasFiveHourRateLimit,
+                currentFreshness: snapshot.fiveHourFreshness,
+                previousFreshness: previous.fiveHourFreshness,
+                previousTime: previousTime,
+                currentTime: currentTime,
+                now: now
+            ),
+            projectedExhaustionEvent(
+                window: .weekly,
+                provider: snapshot.provider,
+                previousRemainingPercent: previous.weeklyRemainingPercent,
+                previousRemainingPercentExact: previous.weeklyRemainingPercentExact,
+                currentRemainingPercent: snapshot.weeklyRemainingPercent,
+                currentRemainingPercentExact: snapshot.weeklyRemainingPercentExact,
+                resetText: snapshot.weeklyResetText,
+                hasRateLimit: snapshot.hasWeeklyRateLimit,
+                currentFreshness: snapshot.weeklyFreshness,
+                previousFreshness: previous.weeklyFreshness,
+                previousTime: previousTime,
+                currentTime: currentTime,
+                now: now
+            )
+        ].compactMap { $0 }
+    }
+
+    private func projectedExhaustionEvent(window: UsageLimitAlertWindow,
+                                          provider: UsageLimitAlertProvider,
+                                          previousRemainingPercent: Int,
+                                          previousRemainingPercentExact: Double?,
+                                          currentRemainingPercent: Int,
+                                          currentRemainingPercentExact: Double?,
+                                          resetText: String,
+                                          hasRateLimit: Bool,
+                                          currentFreshness: UsageLimitAlertFreshness,
+                                          previousFreshness: UsageLimitAlertFreshness,
+                                          previousTime: Date,
+                                          currentTime: Date,
+                                          now: Date) -> UsageLimitAlertEvent? {
+        guard hasRateLimit else { return nil }
+        guard currentFreshness.allowsProjectedAlerts, previousFreshness.allowsProjectedAlerts else { return nil }
+        let elapsed = currentTime.timeIntervalSince(previousTime)
+        guard elapsed >= 60 else { return nil }
+
+        let previousRemaining = Self.remainingPercent(exact: previousRemainingPercentExact, fallback: previousRemainingPercent)
+        let currentRemaining = Self.remainingPercent(exact: currentRemainingPercentExact, fallback: currentRemainingPercent)
+        guard currentRemaining > Double(thresholdPercent),
+              previousRemaining > currentRemaining else {
+            return nil
+        }
+
+        let percentBurned = previousRemaining - currentRemaining
+        let secondsUntilEmpty = currentRemaining / (percentBurned / elapsed)
+        guard secondsUntilEmpty > 0,
+              secondsUntilEmpty <= predictionHorizonSeconds else {
+            return nil
+        }
+
+        let resetDate = UsageResetText.resetDate(
+            kind: window == .fiveHour ? "5h" : "Wk",
+            source: provider.resetSource,
+            raw: resetText,
+            now: currentTime
+        )
+        let projectedRunoutAt = currentTime.addingTimeInterval(secondsUntilEmpty)
+        guard let resetDate,
+              resetDate > now,
+              projectedRunoutAt > now,
+              projectedRunoutAt < resetDate else {
+            return nil
+        }
+
+        let key = resetKey(raw: resetText, date: resetDate)
+        let urgencyBucket = projectionUrgencyBucket(secondsUntilEmpty: secondsUntilEmpty)
+        let dedupeKey = "\(provider.rawValue)-limit-alert-\(window.rawValue)-projectedExhaustion-\(urgencyBucket)-\(key)"
+        guard !defaults.bool(forKey: dedupeKey) else { return nil }
+        defaults.set(true, forKey: dedupeKey)
+
+        return UsageLimitAlertEvent(
+            provider: provider,
+            kind: .projectedExhaustion,
+            window: window,
+            remainingPercent: clampPercent(currentRemainingPercent),
+            resetDate: resetDate,
+            identifier: dedupeKey,
+            projectedSecondsUntilEmpty: secondsUntilEmpty
+        )
+    }
+
+    private static func remainingPercent(exact: Double?, fallback: Int) -> Double {
+        guard let exact, exact.isFinite else { return Double(clampPercent(fallback)) }
+        return max(0, min(100, exact))
+    }
+
+    private func projectionUrgencyBucket(secondsUntilEmpty: TimeInterval) -> String {
+        if secondsUntilEmpty <= 10 * 60 { return "10m" }
+        if secondsUntilEmpty <= 30 * 60 { return "30m" }
+        return "60m"
+    }
+
     private func pressureEvents(window: UsageLimitAlertWindow,
                                 provider: UsageLimitAlertProvider,
                                 remainingPercent: Int,
                                 resetText: String,
                                 hasRateLimit: Bool,
+                                freshness: UsageLimitAlertFreshness,
+                                previousRemainingPercent: Int?,
+                                previousFreshness: UsageLimitAlertFreshness?,
+                                previousTime: Date?,
+                                currentTime: Date,
                                 now: Date) -> [UsageLimitAlertEvent] {
         guard hasRateLimit else { return [] }
+        guard freshness.allowsImmediateAlerts else { return [] }
         let remaining = clampPercent(remainingPercent)
         guard remaining <= thresholdPercent else { return [] }
 
         let resetDate = UsageResetText.resetDate(kind: window == .fiveHour ? "5h" : "Wk", source: provider.resetSource, raw: resetText, now: now)
+        let projectedSecondsUntilEmpty = pressureProjectionSecondsUntilEmpty(
+            currentRemainingPercent: remaining,
+            resetDate: resetDate,
+            currentFreshness: freshness,
+            previousRemainingPercent: previousRemainingPercent,
+            previousFreshness: previousFreshness,
+            previousTime: previousTime,
+            currentTime: currentTime,
+            now: now
+        )
         let key = resetKey(raw: resetText, date: resetDate)
         let kind: UsageLimitAlertKind = remaining <= 0 ? .exhausted : .approaching
         guard (kind == .approaching && approachingEnabled) || (kind == .exhausted && exhaustedEnabled) else { return [] }
@@ -607,14 +1126,49 @@ final class UsageLimitAlertEvaluator {
                 window: window,
                 remainingPercent: remaining,
                 resetDate: resetDate,
-                identifier: dedupeKey
+                identifier: dedupeKey,
+                projectedSecondsUntilEmpty: projectedSecondsUntilEmpty
             )
         ]
     }
 
+    private func pressureProjectionSecondsUntilEmpty(currentRemainingPercent: Int,
+                                                     resetDate: Date?,
+                                                     currentFreshness: UsageLimitAlertFreshness,
+                                                     previousRemainingPercent: Int?,
+                                                     previousFreshness: UsageLimitAlertFreshness?,
+                                                     previousTime: Date?,
+                                                     currentTime: Date,
+                                                     now: Date) -> TimeInterval? {
+        guard currentRemainingPercent > 0,
+              let resetDate,
+              resetDate > now,
+              currentFreshness.allowsProjectedAlerts,
+              previousFreshness?.allowsProjectedAlerts == true,
+              let previousRemainingPercent,
+              let previousTime else {
+            return nil
+        }
+        let elapsed = currentTime.timeIntervalSince(previousTime)
+        guard elapsed >= 60 else { return nil }
+        let previousRemaining = clampPercent(previousRemainingPercent)
+        guard previousRemaining > currentRemainingPercent else { return nil }
+        let percentBurned = Double(previousRemaining - currentRemainingPercent)
+        let secondsUntilEmpty = Double(currentRemainingPercent) / (percentBurned / elapsed)
+        let projectedRunoutAt = currentTime.addingTimeInterval(secondsUntilEmpty)
+        guard secondsUntilEmpty > 0,
+              projectedRunoutAt > now,
+              projectedRunoutAt < resetDate else {
+            return nil
+        }
+        return secondsUntilEmpty
+    }
+
     private func fiveHourResetCompleteEvent(snapshot: UsageLimitSnapshot, now: Date) -> UsageLimitAlertEvent? {
         guard resetCompleteEnabled,
+              snapshot.fiveHourFreshness.allowsImmediateAlerts,
               let previousSnapshot = previousSnapshots[snapshot.provider],
+              previousSnapshot.fiveHourFreshness.allowsImmediateAlerts,
               previousSnapshot.hasFiveHourRateLimit,
               snapshot.hasFiveHourRateLimit,
               let previousReset = UsageResetText.resetDate(kind: "5h", source: snapshot.provider.resetSource, raw: previousSnapshot.fiveHourResetText, now: now),
@@ -652,6 +1206,7 @@ final class UsageLimitAlertEvaluator {
         }
         return "unknown"
     }
+
 }
 
 @MainActor
@@ -661,25 +1216,31 @@ final class UsageLimitNotifier: NSObject, UNUserNotificationCenterDelegate {
     private let evaluator: UsageLimitAlertEvaluator
     private let defaults: UserDefaults
     private let center: UNUserNotificationCenter
-    private var didRequestAuthorization = false
+    private let diagnosticsStore: UsageLimitAlertDiagnosticsStore
 
     init(defaults: UserDefaults = .standard,
          center: UNUserNotificationCenter = .current()) {
         self.defaults = defaults
         self.center = center
         self.evaluator = UsageLimitAlertEvaluator(defaults: defaults)
+        self.diagnosticsStore = UsageLimitAlertDiagnosticsStore(defaults: defaults)
         super.init()
         center.delegate = self
     }
 
     func handle(snapshot: UsageLimitSnapshot, now: Date = Date()) {
         guard !AppRuntime.isRunningTests else { return }
+        diagnosticsStore.recordSnapshot(snapshot, now: now)
         let events = evaluator.evaluate(snapshot: snapshot, now: now)
         for event in events {
-            deliver(event)
+            if deliver(event) {
+                diagnosticsStore.recordImmediateAlert(event, now: now)
+            }
         }
         if let resetEvent = evaluator.scheduledFiveHourReset(snapshot: snapshot, now: now) {
             scheduleFiveHourReset(resetEvent)
+        } else {
+            cancelScheduledFiveHourReset(provider: snapshot.provider)
         }
     }
 
@@ -703,24 +1264,38 @@ final class UsageLimitNotifier: NSObject, UNUserNotificationCenterDelegate {
         return defaults.object(forKey: PreferencesKey.codexLimitNotificationSoundEnabled) as? Bool ?? true
     }
 
-    private func deliver(_ event: UsageLimitAlertEvent) {
+    private func deliver(_ event: UsageLimitAlertEvent) -> Bool {
+        var attemptedDelivery = false
         if soundEnabled {
             NSSound(named: "Glass")?.play()
+            attemptedDelivery = true
         }
-        guard visualAlertsEnabled else { return }
-        ensureAuthorization()
+        guard visualAlertsEnabled else {
+            let summary = attemptedDelivery ? "Sound only; banners off" : "Delivery off"
+            diagnosticsStore.recordDelivery(summary, provider: event.provider)
+            return attemptedDelivery
+        }
 
         let content = UNMutableNotificationContent()
         content.title = event.title
         content.body = event.body
         if soundEnabled { content.sound = .default }
         let request = UNNotificationRequest(identifier: event.identifier, content: content, trigger: nil)
-        center.add(request)
+        enqueueNotificationRequest(
+            request,
+            provider: event.provider,
+            soundAttempted: attemptedDelivery,
+            queuedSummary: "Banner queued",
+            failedPrefix: "Banner failed"
+        )
+        return true
     }
 
     private func scheduleFiveHourReset(_ event: UsageLimitAlertEvent) {
-        guard visualAlertsEnabled, let resetDate = event.resetDate else { return }
-        ensureAuthorization()
+        guard visualAlertsEnabled, let resetDate = event.resetDate else {
+            cancelScheduledFiveHourReset(provider: event.provider)
+            return
+        }
 
         let content = UNMutableNotificationContent()
         content.title = event.title
@@ -729,16 +1304,105 @@ final class UsageLimitNotifier: NSObject, UNUserNotificationCenterDelegate {
         let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: resetDate)
         let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
         let request = UNNotificationRequest(identifier: event.identifier, content: content, trigger: trigger)
-        center.add(request)
+        enqueueNotificationRequest(
+            request,
+            provider: event.provider,
+            soundAttempted: false,
+            queuedSummary: "Reset reminder queued",
+            failedPrefix: "Reset reminder failed",
+            recordDeliveryStatus: false
+        )
+        removePendingFiveHourResetRequests(provider: event.provider, excluding: event.identifier)
+        diagnosticsStore.recordScheduledReset(event)
     }
 
-    private func ensureAuthorization() {
-        guard !didRequestAuthorization else { return }
-        didRequestAuthorization = true
+    func cancelScheduledFiveHourReset(provider: UsageLimitAlertProvider) {
+        diagnosticsStore.clearScheduledReset(provider: provider)
+        removePendingFiveHourResetRequests(provider: provider)
+    }
+
+    private func removePendingFiveHourResetRequests(provider: UsageLimitAlertProvider, excluding retainedIdentifier: String? = nil) {
+        let prefix = Self.fiveHourResetIdentifierPrefix(provider: provider)
+        let center = self.center
+        center.getPendingNotificationRequests { requests in
+            let identifiers = requests
+                .map(\.identifier)
+                .filter { $0.hasPrefix(prefix) && $0 != retainedIdentifier }
+            guard !identifiers.isEmpty else { return }
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        }
+    }
+
+    private static func fiveHourResetIdentifierPrefix(provider: UsageLimitAlertProvider) -> String {
+        "\(provider.rawValue)-limit-reset-five-hour-"
+    }
+
+    private func enqueueNotificationRequest(_ request: UNNotificationRequest,
+                                            provider: UsageLimitAlertProvider,
+                                            soundAttempted: Bool,
+                                            queuedSummary: String,
+                                            failedPrefix: String,
+                                            recordDeliveryStatus: Bool = true) {
         let center = self.center
         center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .notDetermined else { return }
-            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            switch settings.authorizationStatus {
+            case .authorized, .provisional:
+                center.add(request) { [weak self] error in
+                    guard recordDeliveryStatus else { return }
+                    let summary: String
+                    if let error {
+                        summary = "\(soundAttempted ? "Sound played; " : "")\(failedPrefix): \(error.localizedDescription)"
+                    } else {
+                        summary = soundAttempted ? "Sound + \(queuedSummary.lowercased())" : queuedSummary
+                    }
+                    Task { @MainActor in
+                        self?.diagnosticsStore.recordDelivery(summary, provider: provider)
+                    }
+                }
+            case .denied:
+                guard recordDeliveryStatus else { return }
+                let summary = soundAttempted ? "Sound played; banners denied" : "Banners denied"
+                Task { @MainActor in
+                    self.diagnosticsStore.recordDelivery(summary, provider: provider)
+                }
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
+                    if let error {
+                        guard recordDeliveryStatus else { return }
+                        let summary = "\(soundAttempted ? "Sound played; " : "")Authorization failed: \(error.localizedDescription)"
+                        Task { @MainActor in
+                            self?.diagnosticsStore.recordDelivery(summary, provider: provider)
+                        }
+                        return
+                    }
+                    guard granted else {
+                        guard recordDeliveryStatus else { return }
+                        let summary = soundAttempted ? "Sound played; banners denied" : "Banners denied"
+                        Task { @MainActor in
+                            self?.diagnosticsStore.recordDelivery(summary, provider: provider)
+                        }
+                        return
+                    }
+                    center.add(request) { [weak self] error in
+                        guard recordDeliveryStatus else { return }
+                        let summary: String
+                        if let error {
+                            summary = "\(soundAttempted ? "Sound played; " : "")\(failedPrefix): \(error.localizedDescription)"
+                        } else {
+                            summary = soundAttempted ? "Sound + \(queuedSummary.lowercased())" : queuedSummary
+                        }
+                        Task { @MainActor in
+                            self?.diagnosticsStore.recordDelivery(summary, provider: provider)
+                        }
+                    }
+                }
+            @unknown default:
+                guard recordDeliveryStatus else { return }
+                let summary = soundAttempted ? "Sound played; banner status unknown" : "Banner status unknown"
+                Task { @MainActor in
+                    self.diagnosticsStore.recordDelivery(summary, provider: provider)
+                }
+            }
         }
     }
 }
@@ -1355,15 +2019,15 @@ actor CodexStatusService {
         if let snap = await codexOAuthFetcher.fetchUsage(cooldownSuccess: oauthSuccessCooldown) {
             return snap
         }
-        if let snap = await codexRPCProbe.fetchRateLimits() {
+        if let snap = await codexRPCProbe.fetchRateLimits(cooldownSuccess: oauthSuccessCooldown) {
             return snap
         }
         return nil
     }
 
     @discardableResult
-    private func refreshPreferredLiveLimits(visibleFastPath: Bool) async -> CodexUsageSnapshot? {
-        let successCooldown: TimeInterval = visibleFastPath ? 60 : 5 * 60
+    private func refreshPreferredLiveLimits(visibleFastPath _: Bool) async -> CodexUsageSnapshot? {
+        let successCooldown: TimeInterval = 60
         guard let preferredSnap = await fetchPreferredRateLimits(oauthSuccessCooldown: successCooldown) else {
             return nil
         }
@@ -2089,8 +2753,10 @@ actor CodexStatusService {
     }
 
     private func nextInterval() -> UInt64 {
-        // Read Codex-specific polling interval (defaults to 300s = 5 min)
-        let userInterval = UInt64(UserDefaults.standard.object(forKey: "CodexPollingInterval") as? Int ?? 300)
+        // Read Codex-specific polling interval. Visible limits surfaces are capped
+        // at 3 minutes so pinned cockpits and menu-bar tracking stay current.
+        let storedInterval = UserDefaults.standard.object(forKey: "CodexPollingInterval") as? Int
+        let visibleInterval = Self.visiblePollingIntervalSeconds(storedInterval: storedInterval)
 
         // Energy optimization: Stop polling entirely when nothing is visible
         // (menu bar and strips both hidden)
@@ -2103,20 +2769,31 @@ actor CodexStatusService {
         // Energy optimization: Menu-bar background visibility should tick rarely and cheaply.
         if visibilityMode == .menuBackground && !urgent {
             if !Self.onACPower() {
-                return 10 * 60 * 1_000_000_000
+                return 3 * 60 * 1_000_000_000
             }
-            // Clamp to at least 60s on AC power; JSONL parse is mtime-guarded so fast ticks are cheap.
-            return max(UInt64(60), userInterval) * 1_000_000_000
+            // JSONL parse is mtime-guarded and preferred live-limit fetches have their own cooldown.
+            return visibleInterval * 1_000_000_000
         }
 
         // Policy when visible or urgent:
         // - On AC power: use userInterval
-        // - On battery: 300s
+        // - On battery: 3 minutes
         if !Self.onACPower() {
-            return 300 * 1_000_000_000
+            return 3 * 60 * 1_000_000_000
         }
-        return userInterval * 1_000_000_000
+        return visibleInterval * 1_000_000_000
     }
+
+    private nonisolated static func visiblePollingIntervalSeconds(storedInterval: Int?) -> UInt64 {
+        let userInterval = UInt64(storedInterval ?? 60)
+        return min(max(UInt64(60), userInterval), 3 * 60)
+    }
+
+#if DEBUG
+    nonisolated static func visiblePollingIntervalSecondsForTesting(storedInterval: Int?) -> UInt64 {
+        visiblePollingIntervalSeconds(storedInterval: storedInterval)
+    }
+#endif
 
     private func isUrgent() -> Bool {
         // Urgent if 5-hour limit is running low (≤20% remaining = ≥80% used)

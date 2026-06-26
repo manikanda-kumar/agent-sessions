@@ -29,6 +29,302 @@ enum TranscriptSessionRenderKey {
     }
 }
 
+enum TranscriptMarkdownExporter {
+    static func markdownContent(session: Session,
+                                renderedTranscript: String,
+                                viewMode: SessionViewMode,
+                                showTimestamps: Bool,
+                                decorate: (String, Session) -> String,
+                                jsonBuilder: (Session) -> String,
+                                imageReferenceBuilder: ((InlineSessionImage) -> String?)? = nil) -> String {
+        let body = transcriptBody(session: session,
+                                  renderedTranscript: renderedTranscript,
+                                  viewMode: viewMode,
+                                  showTimestamps: showTimestamps,
+                                  decorate: decorate,
+                                  jsonBuilder: jsonBuilder,
+                                  imageReferenceBuilder: imageReferenceBuilder)
+        return "# \(session.listTitle)\n\n" + body
+    }
+
+    private static func transcriptBody(session: Session,
+                                       renderedTranscript: String,
+                                       viewMode: SessionViewMode,
+                                       showTimestamps: Bool,
+                                       decorate: (String, Session) -> String,
+                                       jsonBuilder: (Session) -> String,
+                                       imageReferenceBuilder: ((InlineSessionImage) -> String?)?) -> String {
+        if !session.events.isEmpty {
+            return humanReadableMarkdown(session: session,
+                                         showTimestamps: showTimestamps,
+                                         imageReferenceBuilder: imageReferenceBuilder)
+        }
+
+        let fallback = renderedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !fallback.isEmpty {
+            return "## Transcript\n\n" + fallback
+        }
+
+        let filters: TranscriptFilters = .current(showTimestamps: showTimestamps, showMeta: false)
+        let raw = SessionTranscriptBuilder.buildPlainTerminalTranscript(session: session, filters: filters, mode: viewMode.transcriptRenderMode)
+        let decorated = decorate(raw, session).trimmingCharacters(in: .whitespacesAndNewlines)
+        if decorated.isEmpty, viewMode == .json {
+            let json = jsonBuilder(session).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !json.isEmpty { return "## Raw JSON\n\n" + fenced(json, language: "json") }
+        }
+        if decorated.isEmpty { return "_No transcript content._" }
+        return "## Transcript\n\n" + decorated
+    }
+
+    private static func humanReadableMarkdown(session: Session,
+                                              showTimestamps: Bool,
+                                              imageReferenceBuilder: ((InlineSessionImage) -> String?)?) -> String {
+        let blocks = SessionTranscriptBuilder.coalescedBlocks(for: session, includeMeta: false)
+        let imagesByUserBlockIndex = SessionInlineImageMapper.imagesByUserBlockIndex(for: session)
+        var parts: [String] = [metadataTable(for: session)]
+
+        for (blockIndex, block) in blocks.enumerated() {
+            let images = imagesByUserBlockIndex[blockIndex] ?? []
+            guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || block.kind == .toolCall
+                    || !images.isEmpty else {
+                continue
+            }
+            switch block.kind {
+            case .user:
+                let userPart = renderUser(block, showTimestamps: showTimestamps)
+                if !images.isEmpty {
+                    parts.append(userPart + "\n\n" + renderImages(images, imageReferenceBuilder: imageReferenceBuilder))
+                } else {
+                    parts.append(userPart)
+                }
+            case .assistant:
+                let assistantPart = renderAssistant(block, showTimestamps: showTimestamps)
+                if !images.isEmpty {
+                    parts.append(assistantPart + "\n\n" + renderImages(images, imageReferenceBuilder: imageReferenceBuilder))
+                } else {
+                    parts.append(assistantPart)
+                }
+            case .toolCall:
+                parts.append(renderToolCall(block, showTimestamps: showTimestamps))
+            case .toolOut:
+                parts.append(renderToolOutput(block, source: session.source, showTimestamps: showTimestamps))
+            case .error:
+                parts.append(renderError(block, showTimestamps: showTimestamps))
+            case .meta:
+                parts.append(renderDetails(summary: "Metadata", body: block.text, language: "text"))
+            }
+        }
+
+        return parts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func metadataTable(for session: Session) -> String {
+        var rows: [(String, String)] = [
+            ("Source", session.source.displayName),
+            ("Model", emptyFallback(session.model)),
+            ("Events", "\(session.eventCount)")
+        ]
+        if let startTime = session.startTime {
+            rows.append(("Started", AppDateFormatting.dateTimeMedium(startTime)))
+        }
+        if let endTime = session.endTime {
+            rows.append(("Ended", AppDateFormatting.dateTimeMedium(endTime)))
+        }
+        if let cwd = session.lightweightCwd, !cwd.isEmpty {
+            rows.append(("Working directory", inlineCode(cwd)))
+        }
+        rows.append(("File", inlineCode(session.filePath)))
+
+        let body = rows.map { "| \($0.0) | \(escapeTableCell($0.1)) |" }.joined(separator: "\n")
+        return """
+| Field | Value |
+| --- | --- |
+\(body)
+"""
+    }
+
+    private static func renderUser(_ block: SessionTranscriptBuilder.LogicalBlock, showTimestamps: Bool) -> String {
+        let heading = headingLine("User", timestamp: block.timestamp, showTimestamps: showTimestamps)
+        let text = normalizedBody(block.text)
+        guard !text.isEmpty else { return heading }
+        if shouldBlockquoteUserText(text) {
+            return heading + "\n\n" + blockquote(text)
+        }
+        return heading + "\n\n" + text
+    }
+
+    private static func renderAssistant(_ block: SessionTranscriptBuilder.LogicalBlock, showTimestamps: Bool) -> String {
+        headingLine("Assistant", timestamp: block.timestamp, showTimestamps: showTimestamps)
+            + "\n\n"
+            + normalizedBody(block.text)
+    }
+
+    private static func renderToolCall(_ block: SessionTranscriptBuilder.LogicalBlock, showTimestamps: Bool) -> String {
+        let summary = detailSummary(
+            label: "Tool call",
+            toolName: block.toolName,
+            timestamp: block.timestamp,
+            showTimestamps: showTimestamps
+        )
+        let input = block.toolInput?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = input?.isEmpty == false ? prettyStructuredText(input!) : "No input."
+        return renderDetails(summary: summary, body: body, language: languageHint(for: body))
+    }
+
+    private static func renderImages(_ images: [InlineSessionImage],
+                                     imageReferenceBuilder: ((InlineSessionImage) -> String?)?) -> String {
+        images.map { image in
+            let alt = "Image \(image.sessionImageIndex)"
+            let details = "_\(image.payload.mediaType), \(formattedByteCount(image.payload.approxBytes))_"
+            guard let reference = imageReferenceBuilder?(image) ?? defaultImageReference(for: image) else {
+                return "\(details)\n\n_Image data could not be exported._"
+            }
+            return "\(details)\n\n![\(alt)](\(reference))"
+        }
+        .joined(separator: "\n\n")
+    }
+
+    private static func renderToolOutput(_ block: SessionTranscriptBuilder.LogicalBlock,
+                                         source: SessionSource,
+                                         showTimestamps: Bool) -> String {
+        let summary = detailSummary(
+            label: block.isErrorOutput ? "Tool output warning" : "Tool output",
+            toolName: block.toolName,
+            timestamp: block.timestamp,
+            showTimestamps: showTimestamps
+        )
+        let lines = SessionTranscriptBuilder.displayLines(for: block, source: source)
+        let body = lines.isEmpty ? prettyStructuredText(block.text) : lines.joined(separator: "\n")
+        return renderDetails(summary: summary, body: body, language: languageHint(for: body))
+    }
+
+    private static func renderError(_ block: SessionTranscriptBuilder.LogicalBlock, showTimestamps: Bool) -> String {
+        let heading = headingLine("Error", timestamp: block.timestamp, showTimestamps: showTimestamps)
+        let warning = blockquote("[!WARNING]\n" + normalizedBody(block.text))
+        return heading + "\n\n" + warning
+    }
+
+    private static func headingLine(_ title: String, timestamp: Date?, showTimestamps: Bool) -> String {
+        guard showTimestamps, let timestamp else { return "## \(title)" }
+        return "## \(title) (\(AppDateFormatting.transcriptTimestamp(timestamp)))"
+    }
+
+    private static func detailSummary(label: String, toolName: String?, timestamp: Date?, showTimestamps: Bool) -> String {
+        var summary = label
+        if let toolName, !toolName.isEmpty {
+            summary += ": `\(escapeInlineCode(toolName))`"
+        }
+        if showTimestamps, let timestamp {
+            summary += " (\(AppDateFormatting.transcriptTimestamp(timestamp)))"
+        }
+        return summary
+    }
+
+    private static func renderDetails(summary: String, body: String, language: String) -> String {
+        """
+<details>
+<summary>\(summary)</summary>
+
+\(fenced(body, language: language))
+
+</details>
+"""
+    }
+
+    private static func shouldBlockquoteUserText(_ text: String) -> Bool {
+        let lines = text.components(separatedBy: .newlines)
+        return text.count <= 1_000 && lines.count <= 8 && !text.contains("```")
+    }
+
+    private static func blockquote(_ text: String) -> String {
+        text.components(separatedBy: .newlines)
+            .map { $0.isEmpty ? ">" : "> \($0)" }
+            .joined(separator: "\n")
+    }
+
+    private static func prettyStructuredText(_ text: String) -> String {
+        let trimmed = normalizedBody(text)
+        guard looksLikeJSON(trimmed) else { return trimmed }
+        return PrettyJSON.prettyPrinted(trimmed)
+    }
+
+    private static func normalizedBody(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func languageHint(for text: String) -> String {
+        looksLikeJSON(text) ? "json" : "text"
+    }
+
+    private static func defaultImageReference(for image: InlineSessionImage) -> String? {
+        guard case .file(let fileURL, _, _) = image.payload else { return nil }
+        return markdownLinkDestination(for: fileURL.path)
+    }
+
+    static func markdownLinkDestination(for path: String) -> String {
+        path.addingPercentEncoding(withAllowedCharacters: markdownPathAllowedCharacters) ?? path
+    }
+
+    private static let markdownPathAllowedCharacters: CharacterSet = {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.insert(charactersIn: ":")
+        allowed.remove(charactersIn: "()")
+        return allowed
+    }()
+
+    private static func formattedByteCount(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    private static func looksLikeJSON(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed.hasPrefix("{") && trimmed.hasSuffix("}"))
+            || (trimmed.hasPrefix("[") && trimmed.hasSuffix("]"))
+    }
+
+    private static func fenced(_ text: String, language: String) -> String {
+        let fence = String(repeating: "`", count: max(3, longestBacktickRun(in: text) + 1))
+        return "\(fence)\(language)\n\(normalizedBody(text))\n\(fence)"
+    }
+
+    private static func longestBacktickRun(in text: String) -> Int {
+        var longest = 0
+        var current = 0
+        for character in text {
+            if character == "`" {
+                current += 1
+                longest = max(longest, current)
+            } else {
+                current = 0
+            }
+        }
+        return longest
+    }
+
+    private static func inlineCode(_ text: String) -> String {
+        "`\(escapeInlineCode(text))`"
+    }
+
+    private static func escapeInlineCode(_ text: String) -> String {
+        text.replacingOccurrences(of: "`", with: "\\`")
+    }
+
+    private static func escapeTableCell(_ text: String) -> String {
+        text.replacingOccurrences(of: "|", with: "\\|")
+            .replacingOccurrences(of: "\n", with: "<br>")
+    }
+
+    private static func emptyFallback(_ text: String?) -> String {
+        guard let value = text?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return "-"
+        }
+        return value
+    }
+}
+
 struct TranscriptTailUpdateState: Equatable {
     enum BottomProximity: Equatable {
         case unknown
@@ -145,10 +441,23 @@ struct TranscriptPlainView: View {
     }
 
     private func codexSessionID(for session: Session) -> String? {
+        if session.isSideChat {
+            return nonEmptySessionID(session.parentSessionID)
+        }
+        if let internalID = nonEmptySessionID(session.codexInternalSessionID) {
+            return internalID
+        }
         // Extract full Codex session ID (base64 or UUID from filepath)
         let base = URL(fileURLWithPath: session.filePath).deletingPathExtension().lastPathComponent
         if base.count >= 8 { return base }
         return nil
+    }
+
+    private func nonEmptySessionID(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }
 
@@ -372,6 +681,12 @@ struct UnifiedTranscriptView<Indexer: SessionIndexerProtocol>: View {
                         floatingTranscriptControls(session: session)
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                transcriptSessionIdentityStrip(session: session)
+                    .frame(height: 24)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(NSColor.controlBackgroundColor))
             }
             .onAppear {
                 if lastRenderedSessionID != session.id || transcript.isEmpty {
@@ -651,23 +966,7 @@ struct UnifiedTranscriptView<Indexer: SessionIndexerProtocol>: View {
             // === LEADING GROUP: View mode + JSON status + ID ===
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Picker("View Style", selection: $viewModeRaw) {
-                        Text("Session")
-                            .tag(SessionViewMode.terminal.rawValue)
-                            .help("Session view — terminal-inspired output with colorized commands and tool output. Cmd+Shift+T toggles between Text and Session.")
-                        Text("Text")
-                            .tag(SessionViewMode.transcript.rawValue)
-                            .help("Text view — merged chat and tools. Cmd+Shift+T toggles between Text and Session.")
-                        Text("JSON")
-                            .tag(SessionViewMode.json.rawValue)
-                            .help("JSON view — formatted session JSON for readability. Encrypted blobs and large text blocks are summarized; use the session file on disk for raw JSON.")
-                    }
-                    .pickerStyle(.segmented)
-                    .font(TranscriptToolbarStyle.baseFont)
-                    .labelsHidden()
-                    .controlSize(.regular)
-                    .frame(width: 200)
-                    .accessibilityLabel("View Style")
+                    viewModeMenu
 
                     if isJSONMode && isBuildingJSON {
                         HStack(spacing: 6) {
@@ -715,7 +1014,7 @@ struct UnifiedTranscriptView<Indexer: SessionIndexerProtocol>: View {
             if placeUnifiedPillInline && isUnifiedNavigationVisible {
                 unifiedNavigationPillBody
                     .frame(minWidth: 240, maxWidth: 520)
-                    .layoutPriority(1)
+                    .layoutPriority(2)
             }
 
             Spacer(minLength: 12)
@@ -792,6 +1091,128 @@ struct UnifiedTranscriptView<Indexer: SessionIndexerProtocol>: View {
             }
             .padding(.trailing, 12)
         }
+    }
+
+    private func transcriptSessionIdentityStrip(session: Session) -> some View {
+        HStack(spacing: 6) {
+            if let label = transcriptSessionRelationshipLabel(session) {
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.secondary.opacity(0.10))
+                    )
+            }
+
+            Text(session.listTitle)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if let parentTitle = transcriptSideChatParentTitle(for: session) {
+                Text("of \(parentTitle)")
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .fixedSize(horizontal: false, vertical: true)
+        .help(transcriptSessionIdentityHelp(for: session))
+    }
+
+    private var viewModeMenu: some View {
+        Menu {
+            viewModeMenuButton(.terminal,
+                               title: "Session",
+                               help: "Terminal-inspired output with colorized commands and tool output.")
+            viewModeMenuButton(.transcript,
+                               title: "Text",
+                               help: "Merged chat and tools.")
+            viewModeMenuButton(.json,
+                               title: "JSON",
+                               help: "Formatted session JSON for readability.")
+        } label: {
+            Text(viewModeMenuTitle)
+                .font(TranscriptToolbarStyle.baseFont)
+        }
+        .menuStyle(.button)
+        .controlSize(.regular)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("Choose transcript view")
+        .accessibilityLabel("View Style")
+    }
+
+    private func viewModeMenuButton(_ mode: SessionViewMode,
+                                    title: String,
+                                    help: String) -> some View {
+        Button {
+            setViewMode(mode)
+        } label: {
+            if viewMode == mode {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+        .help(help)
+    }
+
+    private var viewModeMenuTitle: String {
+        switch viewMode {
+        case .terminal: return "Session"
+        case .transcript: return "Text"
+        case .json: return "JSON"
+        }
+    }
+
+    private func setViewMode(_ mode: SessionViewMode) {
+        viewModeRaw = mode.rawValue
+        renderModeRaw = mode.transcriptRenderMode.rawValue
+    }
+
+    private func transcriptSessionRelationshipLabel(_ session: Session) -> String? {
+        if session.isSideChat { return "side" }
+        if session.isSubagent { return "sub" }
+        return nil
+    }
+
+    private func transcriptSideChatParentTitle(for session: Session) -> String? {
+        guard session.isSideChat,
+              let parentID = session.parentSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !parentID.isEmpty else {
+            return nil
+        }
+
+        if let parent = indexer.allSessions.first(where: { candidate in
+            guard !candidate.isSideChat else { return false }
+            if candidate.id == parentID { return true }
+            return candidate.codexInternalSessionIDHint == parentID
+        }) {
+            return parent.listTitle
+        }
+
+        return shortenedSessionID(parentID)
+    }
+
+    private func transcriptSessionIdentityHelp(for session: Session) -> String {
+        var parts: [String] = [session.listTitle]
+        if session.isSideChat, let parent = transcriptSideChatParentTitle(for: session) {
+            parts.append("Parent: \(parent)")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private func shortenedSessionID(_ id: String) -> String {
+        guard id.count > 12 else { return id }
+        return "\(id.prefix(8))..."
     }
 
     @ViewBuilder
@@ -1608,7 +2029,7 @@ struct UnifiedTranscriptView<Indexer: SessionIndexerProtocol>: View {
 
     private func exportMarkdown(session: Session) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.nameFieldStringValue = markdownFilename(for: session)
@@ -1616,10 +2037,74 @@ struct UnifiedTranscriptView<Indexer: SessionIndexerProtocol>: View {
         guard let window = NSApp.keyWindow else { return }
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { return }
-            let header = "# \(session.listTitle)\n\n"
-            let content = header + transcript
+            let assetDirectory = markdownAssetDirectory(for: url)
+            let content = TranscriptMarkdownExporter.markdownContent(
+                session: session,
+                renderedTranscript: transcript,
+                viewMode: viewMode,
+                showTimestamps: showTimestamps,
+                decorate: decorateTranscriptIfNeeded,
+                jsonBuilder: prettyJSONForSession,
+                imageReferenceBuilder: { image in
+                    exportImageReference(for: image, markdownURL: url, assetDirectory: assetDirectory)
+                }
+            )
             try? content.write(to: url, atomically: true, encoding: .utf8)
         }
+    }
+
+    private func markdownAssetDirectory(for markdownURL: URL) -> URL {
+        let name = markdownURL.deletingPathExtension().lastPathComponent + "-assets"
+        return markdownURL.deletingLastPathComponent().appendingPathComponent(name, isDirectory: true)
+    }
+
+    private func exportImageReference(for image: InlineSessionImage, markdownURL: URL, assetDirectory: URL) -> String? {
+        switch image.payload {
+        case .file(let fileURL, _, _):
+            return TranscriptMarkdownExporter.markdownLinkDestination(for: fileURL.path)
+        case .base64:
+            let ext = CodexSessionImagePayload.suggestedFileExtension(for: image.payload.mediaType)
+            let filename = "image-\(String(image.sessionID.prefix(6)))-\(image.sessionImageIndex).\(ext)"
+            do {
+                try FileManager.default.createDirectory(at: assetDirectory, withIntermediateDirectories: true)
+                let data = try CodexSessionImagePayload.decodeImageData(payload: image.payload, maxDecodedBytes: 25 * 1024 * 1024)
+                let destination = uniqueDestinationURL(in: assetDirectory, filename: filename)
+                try data.write(to: destination, options: [.atomic])
+                let relative = relativePath(from: markdownURL.deletingLastPathComponent(), to: destination)
+                return TranscriptMarkdownExporter.markdownLinkDestination(for: relative)
+            } catch {
+                return nil
+            }
+        }
+    }
+
+    private func relativePath(from baseDirectory: URL, to destination: URL) -> String {
+        let baseComponents = baseDirectory.standardizedFileURL.pathComponents
+        let destinationComponents = destination.standardizedFileURL.pathComponents
+        var index = 0
+        while index < baseComponents.count,
+              index < destinationComponents.count,
+              baseComponents[index] == destinationComponents[index] {
+            index += 1
+        }
+
+        let upward = Array(repeating: "..", count: max(0, baseComponents.count - index))
+        let downward = destinationComponents.dropFirst(index)
+        let components = upward + downward
+        return components.isEmpty ? destination.lastPathComponent : components.joined(separator: "/")
+    }
+
+    private func uniqueDestinationURL(in dir: URL, filename: String) -> URL {
+        let base = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        var candidate = dir.appendingPathComponent(filename)
+        var idx = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let name = ext.isEmpty ? "\(base)-\(idx)" : "\(base)-\(idx).\(ext)"
+            candidate = dir.appendingPathComponent(name)
+            idx += 1
+        }
+        return candidate
     }
 
     private func markdownFilename(for session: Session) -> String {

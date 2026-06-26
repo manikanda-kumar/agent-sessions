@@ -1,8 +1,63 @@
 import AppKit
 
 enum ActivationPolicyDecider {
-    static func policy(hideDockIcon: Bool, menuBarEnabled: Bool) -> NSApplication.ActivationPolicy {
-        hideDockIcon && menuBarEnabled ? .accessory : .regular
+    static func policy(
+        hideDockIcon: Bool,
+        menuBarEnabled: Bool,
+        pinnedCockpitAvailable: Bool = false
+    ) -> NSApplication.ActivationPolicy {
+        hideDockIcon && (menuBarEnabled || pinnedCockpitAvailable) ? .accessory : .regular
+    }
+}
+
+enum DockIconPreferenceController {
+    static func isMenuBarEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: PreferencesKey.menuBarEnabled) as? Bool ?? false
+    }
+
+    static func isDockIconHidden(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: PreferencesKey.Advanced.hideDockIcon) as? Bool ?? false
+    }
+
+    static func isPinnedCockpitAvailable(defaults: UserDefaults = .standard) -> Bool {
+        let liveSessionsEnabled = defaults.object(forKey: PreferencesKey.Cockpit.codexActiveSessionsEnabled) as? Bool ?? true
+        let pinnedCockpit = defaults.object(forKey: PreferencesKey.Cockpit.hudPinned) as? Bool ?? false
+        return liveSessionsEnabled && pinnedCockpit
+    }
+
+    static func hasDockHiddenReachability(defaults: UserDefaults = .standard) -> Bool {
+        isMenuBarEnabled(defaults: defaults) || isPinnedCockpitAvailable(defaults: defaults)
+    }
+
+    static func dockIconMenuTitle(defaults: UserDefaults = .standard) -> String {
+        isDockIconHidden(defaults: defaults) ? "Show Dock Icon" : "Hide Dock Icon"
+    }
+
+    static func setDockIconHidden(_ hidden: Bool, defaults: UserDefaults = .standard) {
+        if hidden, !isPinnedCockpitAvailable(defaults: defaults) {
+            defaults.set(true, forKey: PreferencesKey.menuBarEnabled)
+        }
+        defaults.set(hidden, forKey: PreferencesKey.Advanced.hideDockIcon)
+    }
+
+    static func setMenuBarEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: PreferencesKey.menuBarEnabled)
+        if !enabled, !isPinnedCockpitAvailable(defaults: defaults) {
+            defaults.set(false, forKey: PreferencesKey.Advanced.hideDockIcon)
+        }
+    }
+
+    static func reconcileReachability(defaults: UserDefaults = .standard) {
+        if !hasDockHiddenReachability(defaults: defaults), isDockIconHidden(defaults: defaults) {
+            defaults.set(false, forKey: PreferencesKey.Advanced.hideDockIcon)
+        }
+    }
+
+    @discardableResult
+    static func toggleDockIconHidden(defaults: UserDefaults = .standard) -> Bool {
+        let nextValue = !isDockIconHidden(defaults: defaults)
+        setDockIconHidden(nextValue, defaults: defaults)
+        return nextValue
     }
 }
 

@@ -220,8 +220,8 @@ final class StatusItemController: NSObject {
                 if claudeStatus.setupRequired {
                     menu.addItem(makeActionItem(title: "Copy setup command: claude", action: #selector(copyClaudeCommand)))
                 }
-                menu.addItem(makeActionItem(title: resetLine(label: "5h:", percent: claudeStatus.sessionRemainingPercent, reset: staleAwareResetText(kind: "5h", source: .claude, raw: claudeStatus.sessionResetText, lastUpdate: claudeStatus.lastUpdate, eventTimestamp: nil)), action: #selector(openUsagePreferences)))
-                menu.addItem(makeActionItem(title: resetLine(label: "Wk:", percent: claudeStatus.weekAllModelsRemainingPercent, reset: staleAwareResetText(kind: "Wk", source: .claude, raw: claudeStatus.weekAllModelsResetText, lastUpdate: claudeStatus.lastUpdate, eventTimestamp: nil)), action: #selector(openUsagePreferences)))
+                menu.addItem(makeActionItem(title: claudeResetLine(label: "5h:", percent: claudeStatus.sessionRemainingPercent, reset: staleAwareResetText(kind: "5h", source: .claude, raw: claudeStatus.sessionResetText, lastUpdate: claudeStatus.lastUpdate, eventTimestamp: nil)), action: #selector(openUsagePreferences)))
+                menu.addItem(makeActionItem(title: claudeResetLine(label: "Wk:", percent: claudeStatus.weekAllModelsRemainingPercent, reset: staleAwareResetText(kind: "Wk", source: .claude, raw: claudeStatus.weekAllModelsResetText, lastUpdate: claudeStatus.lastUpdate, eventTimestamp: nil)), action: #selector(openUsagePreferences)))
             }
 
             menu.addItem(NSMenuItem.separator())
@@ -269,11 +269,10 @@ final class StatusItemController: NSObject {
             menu.addItem(NSMenuItem.separator())
         }
 
-        menu.addItem(makeActionItem(title: "Open Preferences…", action: #selector(openMenuBarPreferences)))
+        menu.addItem(makeActionItem(title: "Open Settings…", action: #selector(openMenuBarPreferences)))
         menu.addItem(makeActionItem(title: "Hide Menu Bar Item", action: #selector(hideMenuBar)))
-        let dockIconHidden = d.object(forKey: PreferencesKey.Advanced.hideDockIcon) as? Bool ?? false
         menu.addItem(makeActionItem(
-            title: dockIconHidden ? "Show Dock Icon" : "Hide Dock Icon",
+            title: DockIconPreferenceController.dockIconMenuTitle(defaults: d),
             action: #selector(toggleHideDockIcon)
         ))
         menu.addItem(NSMenuItem.separator())
@@ -375,6 +374,7 @@ final class StatusItemController: NSObject {
         guard !claudeStatus.isUpdating else { return }
         claudeStatus.hardProbeNowDiagnostics { diag in
             if !diag.success { self.presentFailureAlert(title: "Claude Probe Failed", diagnostics: diag) }
+            else if diag.unavailableMessage != nil { self.presentFailureAlert(title: "Claude Probe Unavailable", diagnostics: diag) }
         }
     }
     @objc private func copyClaudeCommand() {
@@ -383,18 +383,11 @@ final class StatusItemController: NSObject {
         pb.setString("claude", forType: .string)
     }
     @objc private func hideMenuBar() {
-        let d = UserDefaults.standard
-        d.set(false, forKey: PreferencesKey.Advanced.hideDockIcon)
-        d.set(false, forKey: PreferencesKey.menuBarEnabled)
+        DockIconPreferenceController.setMenuBarEnabled(false)
         // The App listens to this key and hides the status item.
     }
     @objc private func toggleHideDockIcon() {
-        let d = UserDefaults.standard
-        let nextValue = !(d.object(forKey: PreferencesKey.Advanced.hideDockIcon) as? Bool ?? false)
-        if nextValue {
-            d.set(true, forKey: PreferencesKey.menuBarEnabled)
-        }
-        d.set(nextValue, forKey: PreferencesKey.Advanced.hideDockIcon)
+        DockIconPreferenceController.toggleDockIconHidden()
     }
     @objc private func quitApp() {
         NSApp.terminate(nil)
@@ -409,6 +402,14 @@ final class StatusItemController: NSObject {
         let clampedLeft = max(0, min(100, percent))
         let displayPercent = mode.numericPercent(fromLeft: clampedLeft)
         return "\(label) \(displayPercent)% \(mode.suffix)  \(trimmed.isEmpty ? "—" : trimmed)"
+    }
+
+    private func claudeResetLine(label: String, percent: Int, reset: String) -> String {
+        if claudeStatus.lastUpdate == nil {
+            let unavailable = claudeStatus.unavailableMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "\(label) --  \((unavailable?.isEmpty == false) ? "Usage unavailable" : "Waiting for data")"
+        }
+        return resetLine(label: label, percent: percent, reset: reset)
     }
 }
 

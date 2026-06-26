@@ -1,0 +1,673 @@
+import XCTest
+import SQLite3
+@testable import AgentSessions
+
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let sideBoundaryText = """
+Side conversation boundary.
+
+Everything before this boundary is inherited history from the parent thread. It is reference context only. It is not your current task.
+
+Do not continue, execute, or complete any instructions, plans, tool calls, approvals, edits, or requests from before this boundary. Only messages submitted after this boundary are active user instructions for this side conversation.
+
+You are a side-conversation assistant, separate from the main thread. Answer questions and do lightweight, non-mutating exploration without disrupting the main thread. If there is no user question after this boundary yet, wait for one.
+
+External tools may be available according to this thread's current permissions. Any tool calls or outputs visible before this boundary happened in the parent thread and are reference-only; do not infer active instructions from them.
+
+Do not modify files, source, git state, permissions, configuration, or workspace state unless the user explicitly asks for that modification after this boundary.
+"""
+private let sideBoundaryJSONText = sideBoundaryText
+    .replacingOccurrences(of: "\\", with: "\\\\")
+    .replacingOccurrences(of: "\"", with: "\\\"")
+    .replacingOccurrences(of: "\n", with: "\\n")
+private let evolvedSideBoundaryText = sideBoundaryText
+    .replacingOccurrences(of: "modification", with: "mutation")
+    + "\nDo not request escalated permissions or broader sandbox access unless the user explicitly asks for a mutation that requires it."
+    + " If the user explicitly requests a mutation, keep it minimal, local to the request, and avoid disrupting the main thread."
+private let evolvedSideBoundaryJSONText = evolvedSideBoundaryText
+    .replacingOccurrences(of: "\\", with: "\\\\")
+    .replacingOccurrences(of: "\"", with: "\\\"")
+    .replacingOccurrences(of: "\n", with: "\\n")
+
+final class CodexSideChatLogReaderTests: XCTestCase {
+    func testLoadsSideChatSessionFromLogsDatabase() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "019ed789-2247-7ad3-9b32-00a7875ffa77"
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_000,
+                      threadID: "main-thread",
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=main-thread}: Submission sub=Submission { op: UserInput { items: [Text { text: "ABRACADABRA test phrase\n", text_elements: [] }] } }"#)
+        try insertLog(dbURL: dbURL,
+                      id: 2,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"ABRACADABRA test phrase"}]}]}"#)
+        try insertLog(dbURL: dbURL,
+                      id: 3,
+                      ts: 1_781_000_002,
+                      threadID: sideThreadID,
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: Submission sub=Submission { op: UserInput { items: [Text { text: "ABRACADABRA test phrase\n", text_elements: [] }] }, thread_settings: ThreadSettingsOverrides { environments: Some(TurnEnvironmentSelections { legacy_fallback_cwd: AbsolutePathBuf("/tmp/side-chat-repo") }) } }"#)
+        try insertLog(dbURL: dbURL,
+                      id: 4,
+                      ts: 1_781_000_003,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}:turn{model=gpt-5.5 cwd=/tmp/side-chat-repo}: websocket event: {"type":"response.output_text.done","text":"ABRACADABRA test phrase","item_id":"msg_1"}"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.count, 1)
+        let session = try XCTUnwrap(sessions.first)
+        XCTAssertEqual(session.id, CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID))
+        XCTAssertEqual(session.filePath, CodexSideChatLogReader.sideChatSessionPath(threadID: sideThreadID))
+        XCTAssertFalse(session.filePath.hasSuffix("logs_2.sqlite"))
+        XCTAssertTrue(session.isSideChat)
+        XCTAssertFalse(session.isSubagent)
+        XCTAssertNil(session.parentSessionID)
+        XCTAssertNil(session.subagentType)
+        XCTAssertEqual(session.model, "gpt-5.5")
+        XCTAssertEqual(session.cwd, "/tmp/side-chat-repo")
+        XCTAssertEqual(session.events.map(\.kind), [.user, .assistant])
+        XCTAssertEqual(session.modifiedAt, session.endTime)
+        XCTAssertLessThan(session.fileSizeBytes ?? Int.max, 10_000)
+        XCTAssertEqual(session.lightweightTitle, "ABRACADABRA test phrase")
+        XCTAssertFalse(session.title.hasPrefix("Side:"))
+        XCTAssertTrue(session.title.contains("ABRACADABRA test phrase"))
+
+        let filters = Filters(query: "ABRACADABRA test phrase")
+        XCTAssertTrue(FilterEngine.sessionMatches(session,
+                                                  filters: filters,
+                                                  transcriptCache: nil,
+                                                  allowTranscriptGeneration: false))
+
+        let transcript = SessionTranscriptBuilder.buildPlainTerminalTranscript(
+            session: session,
+            filters: .current(showTimestamps: false, showMeta: false),
+            mode: .normal
+        )
+        XCTAssertTrue(transcript.contains("ABRACADABRA test phrase"))
+    }
+
+    func testLoadsSideChatSessionWhenWebsocketJSONHasTrailingLogText() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "trailing-json-side-thread"
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"trailing JSON side phrase"}]}]} trailing span fields after JSON"#)
+        try insertLog(dbURL: dbURL,
+                      id: 2,
+                      ts: 1_781_000_003,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket event: {"type":"response.output_text.done","text":"trailing JSON side answer","item_id":"msg_1"} trailing span fields after JSON"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+        XCTAssertEqual(sessions.first?.events.map(\.text), [
+            "trailing JSON side phrase",
+            "trailing JSON side answer"
+        ])
+        XCTAssertEqual(sessions.first?.lightweightTitle, "trailing JSON side phrase")
+        XCTAssertTrue(FilterEngine.sessionMatches(sessions[0],
+                                                  filters: Filters(query: "#side trailing JSON side phrase"),
+                                                  allowTranscriptGeneration: false))
+    }
+
+    func testLoadsSideChatSessionWithEvolvedBoundaryAfterInheritedInput() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "evolved-boundary-side-thread"
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Inherited parent answer."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(evolvedSideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"evolved side boundary phrase"}]}]}"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+        XCTAssertEqual(sessions.first?.events.map(\.text), ["evolved side boundary phrase"])
+        XCTAssertEqual(sessions.first?.lightweightTitle, "evolved side boundary phrase")
+        XCTAssertTrue(FilterEngine.sessionMatches(sessions[0],
+                                                  filters: Filters(query: "#side evolved side boundary phrase"),
+                                                  allowTranscriptGeneration: false))
+    }
+
+    func testLoadsSideChatSessionWithEvolvedBoundaryAsFirstInputItem() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "evolved-first-boundary-side-thread"
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(evolvedSideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"first evolved side phrase"}]}]}"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+        XCTAssertEqual(sessions.first?.events.map(\.text), ["first evolved side phrase"])
+        XCTAssertEqual(sessions.first?.lightweightTitle, "first evolved side phrase")
+    }
+
+    func testRequestOnlySideChatKeepsRequestModelAndCwd() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "request-only-side-thread"
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}:turn{model=gpt-5.5 cwd=/tmp/request-only-side-repo}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"request-only side phrase"}]}]}"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        let session = try XCTUnwrap(sessions.first)
+        XCTAssertEqual(session.model, "gpt-5.5")
+        XCTAssertEqual(session.cwd, "/tmp/request-only-side-repo")
+        XCTAssertEqual(session.repoName, "request-only-side-repo")
+        XCTAssertEqual(session.events.map(\.text), ["request-only side phrase"])
+    }
+
+    func testSideChatPreservesParentThreadIDFromClientMetadata() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: "child-side-thread",
+                                  firstID: 1,
+                                  firstTS: 1_781_000_001,
+                                  phrase: "parent linked side phrase",
+                                  parentThreadID: "parent-main-thread")
+
+        let session = try XCTUnwrap(CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome,
+                                                                                useCache: false).first)
+
+        XCTAssertTrue(session.isSideChat)
+        XCTAssertEqual(session.codexInternalSessionIDHint, "child-side-thread")
+        XCTAssertEqual(session.parentSessionID, "parent-main-thread")
+    }
+
+    func testLoadsSideChatSessionFromNestedSqliteLogDirectory() throws {
+        let codexHome = try makeCodexHome()
+        let sqliteDir = codexHome.appendingPathComponent("sqlite", isDirectory: true)
+        try FileManager.default.createDirectory(at: sqliteDir, withIntermediateDirectories: true)
+        let dbURL = sqliteDir.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "nested-sqlite-side-thread"
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: sideThreadID,
+                                  firstID: 1,
+                                  firstTS: 1_781_000_001,
+                                  phrase: "nested sqlite side phrase")
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+        XCTAssertEqual(sessions.first?.lightweightTitle, "nested sqlite side phrase")
+    }
+
+    func testRefreshCachesAllLogDatabasesBeforeApplyingReturnLimit() throws {
+        let codexHome = try makeCodexHome()
+        let cacheDir = try makeCodexHome()
+        let cacheURL = cacheDir.appendingPathComponent("side-chat-cache.json")
+        CodexSideChatLogReader.cacheURLOverride = cacheURL
+        defer {
+            CodexSideChatLogReader.cacheURLOverride = nil
+            try? FileManager.default.removeItem(at: cacheDir)
+        }
+
+        let sqliteDir = codexHome.appendingPathComponent("sqlite", isDirectory: true)
+        try FileManager.default.createDirectory(at: sqliteDir, withIntermediateDirectories: true)
+        let nestedDBURL = sqliteDir.appendingPathComponent("logs_2.sqlite")
+        let rootDBURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: nestedDBURL)
+        try createLogsDB(at: rootDBURL)
+
+        try insertSideChatFixture(dbURL: nestedDBURL,
+                                  threadID: "nested-priority-side-thread",
+                                  firstID: 1,
+                                  firstTS: 1_781_000_001,
+                                  phrase: "nested priority side phrase")
+        try insertSideChatFixture(dbURL: rootDBURL,
+                                  threadID: "root-priority-side-thread",
+                                  firstID: 1,
+                                  firstTS: 1_781_000_002,
+                                  phrase: "root priority side phrase")
+        try insertNonSideBoundaryRequestLogs(dbURL: nestedDBURL,
+                                             firstID: 100,
+                                             count: 100)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome,
+                                                                   maxThreads: 1)
+        XCTAssertEqual(sessions.count, 1)
+
+        let cached = CodexSideChatLogReader.loadCachedSideChatSessions(codexHome: codexHome,
+                                                                       maxThreads: 2)
+        XCTAssertEqual(Set(cached.map(\.id)), [
+            CodexSideChatLogReader.sideChatSessionID(threadID: "nested-priority-side-thread"),
+            CodexSideChatLogReader.sideChatSessionID(threadID: "root-priority-side-thread")
+        ])
+    }
+
+    func testCachedSideChatSessionsLoadWithoutCurrentLogRows() throws {
+        let codexHome = try makeCodexHome()
+        let cacheDir = try makeCodexHome()
+        let cacheURL = cacheDir.appendingPathComponent("side-chat-cache.json")
+        CodexSideChatLogReader.cacheURLOverride = cacheURL
+        defer {
+            CodexSideChatLogReader.cacheURLOverride = nil
+            try? FileManager.default.removeItem(at: cacheDir)
+        }
+
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+        let sideThreadID = "019ed789-2247-7ad3-9b32-00a7875ffa77"
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"cached side phrase"}]}]}"#)
+        try insertLog(dbURL: dbURL,
+                      id: 2,
+                      ts: 1_781_000_002,
+                      threadID: sideThreadID,
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: Submission sub=Submission { op: UserInput { items: [Text { text: "cached side phrase\n", text_elements: [] }] } }"#)
+        try insertLog(dbURL: dbURL,
+                      id: 3,
+                      ts: 1_781_000_003,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket event: {"type":"response.output_text.done","text":"cached side answer","item_id":"msg_1"}"#)
+
+        let firstScan = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome)
+        XCTAssertEqual(firstScan.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheURL.path))
+
+        try deleteAllLogs(dbURL: dbURL)
+
+        let cached = CodexSideChatLogReader.loadCachedSideChatSessions(codexHome: codexHome)
+        XCTAssertEqual(cached.map(\.id), firstScan.map(\.id))
+        XCTAssertEqual(cached.first?.filePath, CodexSideChatLogReader.sideChatSessionPath(threadID: sideThreadID))
+        XCTAssertEqual(cached.first?.fileSizeBytes, firstScan.first?.fileSizeBytes)
+        XCTAssertEqual(cached.first?.events.map(\.text), firstScan.first?.events.map(\.text))
+    }
+
+    func testSideChatSessionDoesNotExposeBackingSQLiteFileStats() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "synthetic-stats-side-thread"
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: sideThreadID,
+                                  firstID: 1,
+                                  firstTS: 1_781_000_001,
+                                  phrase: "small synthetic side phrase")
+        let padding = String(repeating: "x", count: 256 * 1024)
+        try insertLog(dbURL: dbURL,
+                      id: 10,
+                      ts: 1_781_999_999,
+                      threadID: "ordinary-thread",
+                      target: "codex_otel.log_only",
+                      body: padding)
+
+        let session = try XCTUnwrap(CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome,
+                                                                                useCache: false).first)
+        let backingSize = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: dbURL.path)[.size] as? NSNumber).intValue
+
+        XCTAssertEqual(session.filePath, CodexSideChatLogReader.sideChatSessionPath(threadID: sideThreadID))
+        XCTAssertLessThan(session.fileSizeBytes ?? Int.max, backingSize)
+        XCTAssertEqual(session.modifiedAt, session.endTime)
+    }
+
+    func testColdDiscoveryFindsRecentSideChatNearNewestRowID() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+        let sideThreadID = "019ed789-2247-7ad3-9b32-00a7875ffa77"
+        let newestID: Int64 = 50_000_000
+
+        try insertLog(dbURL: dbURL,
+                      id: newestID - 2,
+                      ts: 1_781_000_001,
+                      threadID: sideThreadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"recent bounded side phrase"}]}]}"#)
+        try insertLog(dbURL: dbURL,
+                      id: newestID - 1,
+                      ts: 1_781_000_002,
+                      threadID: sideThreadID,
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=\#(sideThreadID)}: Submission sub=Submission { op: UserInput { items: [Text { text: "recent bounded side phrase\n", text_elements: [] }] } }"#)
+        try insertLog(dbURL: dbURL,
+                      id: newestID,
+                      ts: 1_781_000_003,
+                      threadID: "main-thread",
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=main-thread}: Submission sub=Submission { op: UserInput { items: [Text { text: "latest ordinary row\n", text_elements: [] }] } }"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+    }
+
+    func testDiscoveryReadsPastDenseNonSideRequestCandidates() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        let sideThreadID = "older-side-after-dense-candidates"
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: sideThreadID,
+                                  firstID: 1,
+                                  firstTS: 1_781_000_001,
+                                  phrase: "older dense candidate side phrase")
+        try insertNonSideBoundaryRequestLogs(dbURL: dbURL,
+                                             firstID: 100,
+                                             count: 2_500)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+    }
+
+    func testColdDiscoveryBackfillsHistoricSideChatsOutsideRecentRowWindow() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+        let sideThreadID = "019eb2f7-6971-7e90-b7f0-3795e5fe9bbc"
+        let newestID: Int64 = 50_000_000
+
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: sideThreadID,
+                                  firstID: newestID - 8_000_000,
+                                  firstTS: 1_781_000_001,
+                                  phrase: "historic side phrase")
+        try insertLog(dbURL: dbURL,
+                      id: newestID,
+                      ts: 1_781_000_010,
+                      threadID: "main-thread",
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=main-thread}: Submission sub=Submission { op: UserInput { items: [Text { text: "latest ordinary row\n", text_elements: [] }] } }"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertEqual(sessions.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: sideThreadID)])
+    }
+
+    func testCachedDiscoveryFindsAppendedRowsByRowIDEvenWithOlderTimestamps() throws {
+        let codexHome = try makeCodexHome()
+        let cacheDir = try makeCodexHome()
+        let cacheURL = cacheDir.appendingPathComponent("side-chat-cache.json")
+        CodexSideChatLogReader.cacheURLOverride = cacheURL
+        defer {
+            CodexSideChatLogReader.cacheURLOverride = nil
+            try? FileManager.default.removeItem(at: cacheDir)
+        }
+
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+        let firstThreadID = "first-side-thread"
+        let appendedThreadID = "appended-side-thread"
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: firstThreadID,
+                                  firstID: 100,
+                                  firstTS: 1_781_000_100,
+                                  phrase: "cached first phrase")
+
+        let firstScan = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome)
+        XCTAssertEqual(firstScan.map(\.id), [CodexSideChatLogReader.sideChatSessionID(threadID: firstThreadID)])
+
+        try insertSideChatFixture(dbURL: dbURL,
+                                  threadID: appendedThreadID,
+                                  firstID: 200,
+                                  firstTS: 1_781_000_000,
+                                  phrase: "appended older timestamp phrase")
+
+        let refreshed = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome)
+
+        XCTAssertEqual(Set(refreshed.map(\.id)), [
+            CodexSideChatLogReader.sideChatSessionID(threadID: firstThreadID),
+            CodexSideChatLogReader.sideChatSessionID(threadID: appendedThreadID)
+        ])
+    }
+
+    func testIgnoresMainThreadMarkerWithoutSideBoundary() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_000,
+                      threadID: "main-thread",
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=main-thread}: Submission sub=Submission { op: UserInput { items: [Text { text: "ABRACADABRA test phrase\n", text_elements: [] }] } }"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertTrue(sessions.isEmpty)
+    }
+
+    func testIgnoresNormalThreadThatQuotesSideChatBoundaryInRequestBody() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_000,
+                      threadID: "main-thread",
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=main-thread}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)\n\nQuoted from a normal session transcript."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"normal follow-up after quote"}]}]}"#)
+        try insertLog(dbURL: dbURL,
+                      id: 2,
+                      ts: 1_781_000_001,
+                      threadID: "main-thread",
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=main-thread}: Submission sub=Submission { op: UserInput { items: [Text { text: "quoted boundary\n", text_elements: [] }] } }"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertTrue(sessions.isEmpty)
+    }
+
+    func testIgnoresNormalThreadThatQuotesEvolvedBoundaryAfterPriorInput() throws {
+        let codexHome = try makeCodexHome()
+        let dbURL = codexHome.appendingPathComponent("logs_2.sqlite")
+        try createLogsDB(at: dbURL)
+
+        try insertLog(dbURL: dbURL,
+                      id: 1,
+                      ts: 1_781_000_000,
+                      threadID: "main-thread",
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=main-thread}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"prior normal question"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prior normal answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(evolvedSideBoundaryJSONText)\n\nQuoted from a normal session transcript."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"normal follow-up after evolved quote"}]}]}"#)
+
+        let sessions = CodexSideChatLogReader.loadSideChatSessions(codexHome: codexHome, useCache: false)
+
+        XCTAssertTrue(sessions.isEmpty)
+    }
+
+    private func makeCodexHome() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AgentSessions-SideChatLogs-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func createLogsDB(at url: URL) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            throw NSError(domain: "SideChatLogsFixture", code: 1)
+        }
+        defer { sqlite3_close(db) }
+
+        try exec(db, """
+        CREATE TABLE logs (
+            id INTEGER PRIMARY KEY,
+            ts INTEGER NOT NULL,
+            ts_nanos INTEGER NOT NULL,
+            level TEXT NOT NULL,
+            target TEXT NOT NULL,
+            feedback_log_body TEXT,
+            module_path TEXT,
+            file TEXT,
+            line INTEGER,
+            thread_id TEXT,
+            process_uuid TEXT,
+            estimated_bytes INTEGER NOT NULL DEFAULT 0
+        );
+        """)
+    }
+
+    private func insertLog(dbURL: URL,
+                           id: Int64,
+                           ts: Int64,
+                           threadID: String,
+                           target: String,
+                           body: String) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            throw NSError(domain: "SideChatLogsFixture", code: 2)
+        }
+        defer { sqlite3_close(db) }
+
+        let sql = """
+        INSERT INTO logs(id, ts, ts_nanos, level, target, feedback_log_body, thread_id, estimated_bytes)
+        VALUES (?, ?, 0, 'INFO', ?, ?, ?, ?);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw NSError(domain: "SideChatLogsFixture", code: 3)
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int64(stmt, 1, id)
+        sqlite3_bind_int64(stmt, 2, ts)
+        sqlite3_bind_text(stmt, 3, target, -1, sqliteTransient)
+        sqlite3_bind_text(stmt, 4, body, -1, sqliteTransient)
+        sqlite3_bind_text(stmt, 5, threadID, -1, sqliteTransient)
+        sqlite3_bind_int64(stmt, 6, Int64(body.utf8.count))
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw NSError(domain: "SideChatLogsFixture", code: 4)
+        }
+    }
+
+    private func insertNonSideBoundaryRequestLogs(dbURL: URL,
+                                                  firstID: Int64,
+                                                  count: Int) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            throw NSError(domain: "SideChatLogsFixture", code: 7)
+        }
+        defer { sqlite3_close(db) }
+
+        try exec(db, "BEGIN TRANSACTION;")
+        let sql = """
+        INSERT INTO logs(id, ts, ts_nanos, level, target, feedback_log_body, thread_id, estimated_bytes)
+        VALUES (?, ?, 0, 'INFO', 'codex_api::endpoint::responses_websocket', ?, ?, ?);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw NSError(domain: "SideChatLogsFixture", code: 8)
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        for offset in 0..<count {
+            let id = firstID + Int64(offset)
+            let threadID = "ordinary-boundary-quote-\(offset)"
+            let body = #"session_loop{thread_id=\#(threadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)\n\nQuoted from a normal session transcript."}]}]}"#
+            sqlite3_bind_int64(stmt, 1, id)
+            sqlite3_bind_int64(stmt, 2, 1_781_000_100 + Int64(offset))
+            sqlite3_bind_text(stmt, 3, body, -1, sqliteTransient)
+            sqlite3_bind_text(stmt, 4, threadID, -1, sqliteTransient)
+            sqlite3_bind_int64(stmt, 5, Int64(body.utf8.count))
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                throw NSError(domain: "SideChatLogsFixture", code: 9)
+            }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+        }
+        try exec(db, "COMMIT;")
+    }
+
+    private func insertSideChatFixture(dbURL: URL,
+                                       threadID: String,
+                                       firstID: Int64,
+                                       firstTS: Int64,
+                                       phrase: String,
+                                       parentThreadID: String? = nil) throws {
+        let clientMetadata = parentThreadID.map {
+            #","client_metadata":{"x-codex-turn-metadata":"{\"forked_from_thread_id\":\"\#($0)\"}"}"#
+        } ?? ""
+        try insertLog(dbURL: dbURL,
+                      id: firstID,
+                      ts: firstTS,
+                      threadID: threadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(threadID)}: websocket request: {"instructions":"You are Codex.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(sideBoundaryJSONText)"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"\#(phrase)"}]}]\#(clientMetadata)}"#)
+        try insertLog(dbURL: dbURL,
+                      id: firstID + 1,
+                      ts: firstTS + 1,
+                      threadID: threadID,
+                      target: "codex_core::session::handlers",
+                      body: #"session_loop{thread_id=\#(threadID)}: Submission sub=Submission { op: UserInput { items: [Text { text: "\#(phrase)\n", text_elements: [] }] } }"#)
+        try insertLog(dbURL: dbURL,
+                      id: firstID + 2,
+                      ts: firstTS + 2,
+                      threadID: threadID,
+                      target: "codex_api::endpoint::responses_websocket",
+                      body: #"session_loop{thread_id=\#(threadID)}: websocket event: {"type":"response.output_text.done","text":"\#(phrase) answer","item_id":"msg_1"}"#)
+    }
+
+    private func exec(_ db: OpaquePointer?, _ sql: String) throws {
+        var err: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &err) == SQLITE_OK else {
+            let message = err.map { String(cString: $0) } ?? "unknown sqlite error"
+            sqlite3_free(err)
+            throw NSError(domain: "SideChatLogsFixture", code: 5, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+
+    private func deleteAllLogs(dbURL: URL) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            throw NSError(domain: "SideChatLogsFixture", code: 6)
+        }
+        defer { sqlite3_close(db) }
+        try exec(db, "DELETE FROM logs;")
+    }
+}

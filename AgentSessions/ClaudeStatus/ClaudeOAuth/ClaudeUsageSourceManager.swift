@@ -37,14 +37,20 @@ actor ClaudeUsageSourceManager {
 
     // MARK: - Thresholds
 
-    private static let refreshInterval: TimeInterval = 5 * 60         // 5 minutes (OAuth + Web)
+    private static let refreshInterval: TimeInterval = 60             // 60 seconds (OAuth + Web)
     private static let cacheStaleThreshold: TimeInterval = 10 * 60    // 10 minutes
     private static let cacheHardExpire: TimeInterval = 30 * 60        // 30 minutes
     private static let credentialWatchInterval: TimeInterval = 30     // 30s watch poll
-    private static let visibleFailureRetryInterval: TimeInterval = 5 * 60
+    private static let visibleFailureRetryInterval: TimeInterval = 3 * 60
     // Fast retries during cold start (first 90s) to close the blank-screen gap.
     private static let coldStartWindow: TimeInterval = 90
     private static let coldStartRetryDelays: [TimeInterval] = [10, 30]
+
+#if DEBUG
+    nonisolated static var refreshIntervalForTesting: TimeInterval {
+        refreshInterval
+    }
+#endif
 
     // MARK: - State
 
@@ -121,7 +127,7 @@ actor ClaudeUsageSourceManager {
             let age = Date().timeIntervalSince(cached.fetchedAt)
             if age < Self.cacheHardExpire {
                 var serving = cached
-                serving.source = .cachedOAuth
+                serving.source = Self.cachedSource(for: cached.source)
                 serving.health = age < Self.cacheStaleThreshold ? .live : .stale
                 publish(serving)
                 lastOAuthSnapshot = cached
@@ -227,13 +233,14 @@ actor ClaudeUsageSourceManager {
         }
 
         do {
-            let (raw, bodyHash, rawBody) = try await usageClient.fetch(token: resolved.token)
+            let (raw, bodyHash, rawBody, fromCache, fetchedAt) = try await usageClient.fetch(token: resolved.token)
             lastRawOAuthPayload = rawBody
-            guard let snapshot = ClaudeUsageNormalizer.normalize(raw, bodyHash: bodyHash) else {
+            guard var snapshot = Self.normalizedOAuthSnapshot(raw, bodyHash: bodyHash, fromCache: fromCache, fetchedAt: fetchedAt) else {
                 os_log("ClaudeOAuth: normalizer returned nil (empty payload)", log: log, type: .error)
                 await handleOAuthFailure(reason: "empty payload")
                 return
             }
+            snapshot = await mergeMissingFiveHourWindowIfNeeded(snapshot)
 
             // Success — reset all failure state
             oauthFailureCount = 0
@@ -245,14 +252,14 @@ actor ClaudeUsageSourceManager {
             lastOAuthSnapshot = snapshot
             await store.save(snapshot)
 
-            if usingWebFallback && mode != .webOnly {
+            if !fromCache, usingWebFallback && mode != .webOnly {
                 os_log("ClaudeOAuth: OAuth recovered, deactivating web API fallback", log: log, type: .info)
                 usingWebFallback = false
                 webRefreshTask?.cancel()
                 webRefreshTask = nil
                 webFailureCount = 0
             }
-            if usingTmuxFallback {
+            if !fromCache, usingTmuxFallback {
                 os_log("ClaudeOAuth: OAuth recovered, deactivating tmux fallback", log: log, type: .info)
                 await deactivateTmuxFallback()
             }
@@ -281,6 +288,7 @@ actor ClaudeUsageSourceManager {
                        log: log, type: .info)
             }
             await handleOAuthFailure(reason: "401 unauthorized")
+            publishCLIAuthRequired()
 
         } catch ClaudeOAuthUsageClientError.rateLimited(let retryAfter) {
             let delay = retryAfter + 10
@@ -440,6 +448,30 @@ actor ClaudeUsageSourceManager {
         }
     }
 
+    private nonisolated static func normalizedOAuthSnapshot(_ raw: ClaudeOAuthRawUsageResponse,
+                                                            bodyHash: String,
+                                                            fromCache: Bool,
+                                                            fetchedAt: Date) -> ClaudeLimitSnapshot? {
+        guard var snapshot = ClaudeUsageNormalizer.normalize(raw, bodyHash: bodyHash, fetchedAt: fetchedAt) else {
+            return nil
+        }
+        if fromCache { snapshot.source = .cachedOAuth }
+        return snapshot
+    }
+
+    private nonisolated static func cachedSource(for source: ClaudeUsageSource) -> ClaudeUsageSource {
+        switch source {
+        case .oauthEndpoint, .cachedOAuth:
+            return .cachedOAuth
+        case .webEndpoint, .cachedWeb:
+            return .cachedWeb
+        case .tmuxUsage:
+            return .tmuxUsage
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
     private func wakeOAuthForVisibleTransition() {
         // Visibility should wake credential-gated failures, but not cancel a server-imposed 429 backoff.
         if let deadline = oauthRateLimitRetryDeadline, deadline > Date() {
@@ -502,13 +534,14 @@ actor ClaudeUsageSourceManager {
         }
 
         do {
-            let (raw, bodyHash, fromCache) = try await webUsageClient.fetch(sessionKey: cookie.sessionKey)
-            guard var snapshot = ClaudeWebUsageNormalizer.normalize(raw, bodyHash: bodyHash) else {
+            let (raw, bodyHash, fromCache, fetchedAt) = try await webUsageClient.fetch(sessionKey: cookie.sessionKey)
+            guard var snapshot = ClaudeWebUsageNormalizer.normalize(raw, bodyHash: bodyHash, fetchedAt: fetchedAt) else {
                 os_log("ClaudeOAuth: web normalizer returned nil", log: log, type: .error)
                 await handleWebFailure(reason: "empty web payload")
                 return
             }
             if fromCache { snapshot.source = .cachedWeb }
+            snapshot = await mergeMissingFiveHourWindowIfNeeded(snapshot)
 
             webFailureCount = 0
             publish(snapshot)
@@ -558,12 +591,11 @@ actor ClaudeUsageSourceManager {
         let handler = self.snapshotHandler
         let availHandler = self.availabilityHandler
         let ctx = visibilityContext
-        let store = self.store
 
         await adapter.start(
             handler: { snap in
                 handler?(snap)
-                Task { await store.save(snap) }
+                Task { await self.recordExternalSnapshot(snap) }
             },
             availabilityHandler: { a in availHandler?(a) }
         )
@@ -571,6 +603,18 @@ actor ClaudeUsageSourceManager {
             menuVisible: ctx.menuVisible,
             stripVisible: ctx.stripVisible,
             appIsActive: ctx.appIsActive
+        )
+    }
+
+    private func publishCLIAuthRequired() {
+        availabilityHandler?(
+            ClaudeServiceAvailability(
+                cliUnavailable: false,
+                tmuxUnavailable: false,
+                loginRequired: true,
+                setupRequired: false,
+                setupHint: "Claude Code CLI credentials are stale. Open Terminal and run: claude /login"
+            )
         )
     }
 
@@ -624,12 +668,63 @@ actor ClaudeUsageSourceManager {
 
     /// Persist a snapshot produced outside the normal OAuth/tmux loop (e.g., hard probe).
     func saveSnapshot(_ snapshot: ClaudeLimitSnapshot) async {
-        await store.save(snapshot)
+        await recordExternalSnapshot(snapshot)
     }
+
+#if DEBUG
+    nonisolated static func normalizedOAuthSnapshotForTesting(_ raw: ClaudeOAuthRawUsageResponse,
+                                                              bodyHash: String,
+                                                              fromCache: Bool,
+                                                              fetchedAt: Date) -> ClaudeLimitSnapshot? {
+        normalizedOAuthSnapshot(raw, bodyHash: bodyHash, fromCache: fromCache, fetchedAt: fetchedAt)
+    }
+#endif
 
     // MARK: - Private
 
+    private func mergeMissingFiveHourWindowIfNeeded(_ snapshot: ClaudeLimitSnapshot) async -> ClaudeLimitSnapshot {
+        if let merged = Self.mergeMissingFiveHourWindow(incoming: snapshot, previous: lastOAuthSnapshot, now: Date()) {
+            return merged
+        }
+        guard let persisted = await store.load() else { return snapshot }
+        return Self.mergeMissingFiveHourWindow(incoming: snapshot, previous: persisted, now: Date()) ?? snapshot
+    }
+
+    private func recordExternalSnapshot(_ snapshot: ClaudeLimitSnapshot) async {
+        lastOAuthSnapshot = snapshot
+        await store.save(snapshot)
+    }
+
     private func publish(_ snapshot: ClaudeLimitSnapshot) {
         snapshotHandler?(snapshot)
+    }
+}
+
+extension ClaudeUsageSourceManager {
+    nonisolated static func mergeMissingFiveHourWindow(incoming: ClaudeLimitSnapshot,
+                                                       previous: ClaudeLimitSnapshot?,
+                                                       now: Date = Date()) -> ClaudeLimitSnapshot? {
+        guard incoming.fiveHourResetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        guard let previous,
+              previous.fiveHourUsedRatio != nil,
+              !previous.fiveHourResetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              previous.health != .failed,
+              now.timeIntervalSince(previous.fetchedAt) < 30 * 60,
+              let previousReset = UsageResetText.resetDate(
+                kind: "5h",
+                source: .claude,
+                raw: previous.fiveHourResetText,
+                now: previous.fetchedAt
+              ),
+              previousReset > now else {
+            return nil
+        }
+
+        var merged = incoming
+        merged.fiveHourUsedRatio = previous.fiveHourUsedRatio
+        merged.fiveHourResetText = previous.fiveHourResetText
+        return merged
     }
 }
