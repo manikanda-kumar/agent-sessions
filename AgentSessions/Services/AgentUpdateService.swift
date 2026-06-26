@@ -398,6 +398,10 @@ private extension AgentUpdateService {
             return nil
         case .grok:
             return nil
+        case .amp:
+            return nil
+        case .antigravity:
+            return nil
         }
     }
 

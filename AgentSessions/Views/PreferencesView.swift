@@ -84,6 +84,8 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.Agents.cursorEnabled) var cursorAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.piEnabled) var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
     @AppStorage(PreferencesKey.Agents.grokEnabled) var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
+    @AppStorage(PreferencesKey.Agents.ampEnabled) var ampAgentEnabled: Bool = AgentEnablement.isEnabled(.amp)
+    @AppStorage(PreferencesKey.Agents.antigravityEnabled) var antigravityAgentEnabled: Bool = AgentEnablement.isEnabled(.antigravity)
     // Menu bar prefs
     @AppStorage(PreferencesKey.menuBarEnabled) var menuBarEnabled: Bool = false
     @AppStorage(PreferencesKey.menuBarScope) var menuBarScopeRaw: String = MenuBarScope.both.rawValue
@@ -249,6 +251,12 @@ struct PreferencesView: View {
     @AppStorage(PreferencesKey.Paths.grokSessionsRootOverride) var grokSessionsPath: String = ""
     @State var grokSessionsPathValid: Bool = true
     @State var grokSessionsPathDebounce: DispatchWorkItem? = nil
+    @AppStorage(PreferencesKey.Paths.ampSessionsRootOverride) var ampSessionsPath: String = ""
+    @State var ampSessionsPathValid: Bool = true
+    @State var ampSessionsPathDebounce: DispatchWorkItem? = nil
+    @AppStorage(PreferencesKey.Paths.antigravitySessionsRootOverride) var antigravitySessionsPath: String = ""
+    @State var antigravitySessionsPathValid: Bool = true
+    @State var antigravitySessionsPathDebounce: DispatchWorkItem? = nil
     // Per-agent update flow state
     @State var agentUpdateCheckingSources: Set<SessionSource> = []
     @State var agentUpdatingSources: Set<SessionSource> = []
@@ -256,7 +264,7 @@ struct PreferencesView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
             List(selection: $selectedTab) {
-                ForEach(visibleTabs.filter { $0 != .about && $0 != .codexCLI && $0 != .claudeResume && $0 != .opencode && $0 != .geminiCLI && $0 != .hermesCLI && $0 != .copilotCLI && $0 != .droidCLI && $0 != .openClawCLI && $0 != .cursor && $0 != .pi && $0 != .grok }, id: \.self) { tab in
+                ForEach(visibleTabs.filter { $0 != .about && $0 != .codexCLI && $0 != .claudeResume && $0 != .opencode && $0 != .geminiCLI && $0 != .hermesCLI && $0 != .copilotCLI && $0 != .droidCLI && $0 != .openClawCLI && $0 != .cursor && $0 != .pi && $0 != .grok && $0 != .amp && $0 != .antigravity }, id: \.self) { tab in
                     Label(tab.title, systemImage: tab.iconName)
                         .tag(tab)
                 }
@@ -268,7 +276,7 @@ struct PreferencesView: View {
                     Label(tab.title, systemImage: tab.iconName)
                         .tag(tab)
                 }
-                ForEach([PreferencesTab.cursor, .pi, .grok, .hermesCLI, .openClawCLI], id: \.self) { tab in
+                ForEach([PreferencesTab.cursor, .pi, .grok, .amp, .antigravity, .hermesCLI, .openClawCLI], id: \.self) { tab in
                     Label(tab.title, systemImage: tab.iconName)
                         .tag(tab)
                 }
@@ -412,6 +420,10 @@ struct PreferencesView: View {
                 piTab
             case .grok:
                 grokTab
+            case .amp:
+                ampTab
+            case .antigravity:
+                antigravityTab
             case .remote:
                 remoteTabImpl
             case .about:
@@ -892,6 +904,8 @@ struct PreferencesView: View {
         case .cursor: scheduleCursorProbe()
         case .pi: schedulePiProbe()
         case .grok: scheduleGrokProbe()
+        case .amp, .antigravity:
+            break
         }
     }
 
@@ -919,6 +933,8 @@ struct PreferencesView: View {
             return piResolvedPath
         case .grok:
             return grokResolvedPath
+        case .amp, .antigravity:
+            return nil
         }
     }
 
@@ -957,6 +973,8 @@ struct PreferencesView: View {
         case .grok:
             let value = grokSettings.binaryPath
             return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        case .amp, .antigravity:
+            return nil
         }
     }
 
@@ -1091,6 +1109,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
     case cursor
     case pi
     case grok
+    case amp
+    case antigravity
     case remote
     case about
 
@@ -1116,6 +1136,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         case .cursor: return "Cursor"
         case .pi: return "Pi"
         case .grok: return "Grok Build"
+        case .amp: return "Amp"
+        case .antigravity: return "Antigravity"
         case .remote: return "Remote"
         case .about: return "About"
         }
@@ -1141,6 +1163,8 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
         case .cursor: return "cursorarrow.rays"
         case .pi: return "p.circle"
         case .grok: return "x.circle"
+        case .amp: return "bolt.circle"
+        case .antigravity: return "sparkle"
         case .remote: return "globe"
         case .about: return "info.circle"
         }
@@ -1149,7 +1173,7 @@ enum PreferencesTab: String, CaseIterable, Identifiable {
 
 private extension PreferencesView {
     // Sidebar order: General → Agent Cockpit → Unified Window → Usage Tracking → Usage Probes → Menu Bar → Advanced → About → Agents
-    var visibleTabs: [PreferencesTab] { [.general, .agentCockpit, .unified, .usageTracking, .usageProbes, .menuBar, .advanced, .about, .codexCLI, .claudeResume, .opencode, .geminiCLI, .copilotCLI, .cursor, .pi, .grok, .remote, .hermesCLI, .openClawCLI] }
+    var visibleTabs: [PreferencesTab] { [.general, .agentCockpit, .unified, .usageTracking, .usageProbes, .menuBar, .advanced, .about, .codexCLI, .claudeResume, .opencode, .geminiCLI, .copilotCLI, .cursor, .pi, .grok, .amp, .antigravity, .remote, .hermesCLI, .openClawCLI] }
 }
 
 // MARK: - Probe helpers
@@ -1413,6 +1437,8 @@ extension PreferencesView {
             if piVersionString == nil && piProbeState != .probing { probePi() }
         case .grok:
             if grokVersionString == nil && grokProbeState != .probing { probeGrok() }
+        case .amp, .antigravity:
+            break
         case .menuBar, .usageProbes, .general, .unified, .advanced, .agentCockpit, .about, .remote:
             break
         }

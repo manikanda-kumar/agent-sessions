@@ -84,6 +84,12 @@ enum TranscriptColorSystem {
         case .grok:
             // Neutral slate accent for Grok Build.
             return NSColor(calibratedRed: 0.42, green: 0.44, blue: 0.50, alpha: 1.0)
+        case .amp:
+            // Electric amber accent for Amp.
+            return NSColor(calibratedRed: 0.95, green: 0.72, blue: 0.18, alpha: 1.0)
+        case .antigravity:
+            // Violet accent for Antigravity.
+            return NSColor(calibratedRed: 0.58, green: 0.36, blue: 0.92, alpha: 1.0)
         }
     }
 

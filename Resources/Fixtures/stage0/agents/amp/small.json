@@ -1,0 +1,38 @@
+{
+  "v": 142,
+  "id": "T-019b18d0-d9af-77f4-8a95-0621cfa5e265",
+  "title": "Fixture amp thread title",
+  "created": 1765647899058,
+  "env": {
+    "initial": {
+      "trees": [
+        {
+          "uri": "file:///tmp/as-agent-fixture/project",
+          "displayName": "project"
+        }
+      ]
+    }
+  },
+  "messages": [
+    {
+      "role": "user",
+      "messageId": 0,
+      "content": [
+        {
+          "type": "text",
+          "text": "Summarize hello.py without editing files."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "messageId": 1,
+      "content": [
+        {
+          "type": "text",
+          "text": "hello.py prints a fixture greeting."
+        }
+      ]
+    }
+  ]
+}

@@ -35,6 +35,22 @@ final class NewProviderDiscoverabilityTests: XCTestCase {
         XCTAssertEqual(SessionSource.grok.versionIntroduced, "3.9.2")
     }
 
+    func testAmpVersionIntroduced() {
+        XCTAssertEqual(SessionSource.amp.versionIntroduced, "3.9.3")
+    }
+
+    func testAntigravityVersionIntroduced() {
+        XCTAssertEqual(SessionSource.antigravity.versionIntroduced, "3.9.3")
+    }
+
+    func testNewProviderScreens_returnsAmpAndAntigravityForVersion3_9_3() {
+        let screens = OnboardingContent.newProviderScreens(for: "3.9.3")
+        XCTAssertEqual(screens.count, 1)
+        let showcase = screens[0].agentShowcase
+        XCTAssertEqual(showcase.map(\.title), ["Amp", "Antigravity"])
+        XCTAssertEqual(showcase.map(\.symbolName), ["bolt.circle", "sparkle"])
+    }
+
     func testOriginalProvidersHaveEarlyVersions() {
         XCTAssertEqual(SessionSource.codex.versionIntroduced, "1.0")
         XCTAssertEqual(SessionSource.claude.versionIntroduced, "1.0")

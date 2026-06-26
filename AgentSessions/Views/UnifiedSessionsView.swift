@@ -273,6 +273,8 @@ struct UnifiedSessionsView: View {
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
     let grokIndexer: GrokSessionIndexer
+    let ampIndexer: AmpSessionIndexer
+    let antigravityIndexer: AntigravitySessionIndexer
     @EnvironmentObject var codexUsageModel: CodexUsageModel
     @EnvironmentObject var claudeUsageModel: ClaudeUsageModel
     @EnvironmentObject var activeCodexSessions: CodexActiveSessionsModel
@@ -321,6 +323,8 @@ struct UnifiedSessionsView: View {
 	    @AppStorage(PreferencesKey.Agents.cursorEnabled) private var cursorAgentEnabled: Bool = true
 	    @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
 	    @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
+	    @AppStorage(PreferencesKey.Agents.ampEnabled) private var ampAgentEnabled: Bool = AgentEnablement.isEnabled(.amp)
+	    @AppStorage(PreferencesKey.Agents.antigravityEnabled) private var antigravityAgentEnabled: Bool = AgentEnablement.isEnabled(.antigravity)
 	    @State private var autoSelectEnabled: Bool = true
 	    @State private var isDatasetChurning: Bool = false
 	    @State private var isAutoSelectingFromSearch: Bool = false
@@ -371,6 +375,8 @@ struct UnifiedSessionsView: View {
          cursorIndexer: CursorSessionIndexer,
          piIndexer: PiSessionIndexer,
          grokIndexer: GrokSessionIndexer,
+         ampIndexer: AmpSessionIndexer,
+         antigravityIndexer: AntigravitySessionIndexer,
          analyticsReady: Bool,
          analyticsPhase: AnalyticsIndexPhase,
          analyticsIsStale: Bool,
@@ -388,6 +394,8 @@ struct UnifiedSessionsView: View {
         self.cursorIndexer = cursorIndexer
         self.piIndexer = piIndexer
         self.grokIndexer = grokIndexer
+        self.ampIndexer = ampIndexer
+        self.antigravityIndexer = antigravityIndexer
         self.analyticsReady = analyticsReady
         self.analyticsPhase = analyticsPhase
         self.analyticsIsStale = analyticsIsStale
@@ -459,6 +467,18 @@ struct UnifiedSessionsView: View {
                 transcriptCache: grokIndexer.searchTranscriptCache,
                 update: { grokIndexer.updateSession($0) },
                 parseFull: { url, _ in GrokSessionParser.parseFileFull(at: url) }
+            ),
+            .amp: .init(
+                transcriptCache: ampIndexer.searchTranscriptCache,
+                update: { ampIndexer.updateSession($0) },
+                parseFull: { url, _ in AmpSessionParser.parseFileFull(at: url) }
+            ),
+            .antigravity: .init(
+                transcriptCache: antigravityIndexer.searchTranscriptCache,
+                update: { antigravityIndexer.updateSession($0) },
+                parseFull: { url, forcedID in
+                    AntigravitySessionParser.parseSessionFull(id: forcedID, historyURL: url)
+                }
             ),
         ])
         _searchCoordinator = StateObject(wrappedValue: SearchCoordinator(store: store))
@@ -559,6 +579,8 @@ struct UnifiedSessionsView: View {
 
         let afterGrok = afterPi
             .onChange(of: unified.includeGrok) { _, _ in restartSearchIfRunning() }
+            .onChange(of: unified.includeAmp) { _, _ in restartSearchIfRunning() }
+            .onChange(of: unified.includeAntigravity) { _, _ in restartSearchIfRunning() }
 
         let afterActiveOnly = afterGrok
             .onChange(of: showActiveSessionsOnly) { _, _ in
@@ -1211,6 +1233,10 @@ struct UnifiedSessionsView: View {
             return true // session file path or id; falls back to --continue
         case .grok:
             return true // session directory UUID; uses grok -r
+        case .amp:
+            return true // Amp thread IDs use amp threads continue
+        case .antigravity:
+            return true // Antigravity conversation UUIDs use agy --conversation
         case .gemini:
             return (geminiCLISessionID ?? GeminiSessionIDHelper.deriveSessionID(from: session)) != nil
         default:
@@ -1327,6 +1353,14 @@ struct UnifiedSessionsView: View {
             )
             pb.setString(command, forType: .string)
 
+        case .amp:
+            let command = AgentResumeHintBuilder.makeHint(source: .amp, sessionID: session.id, cwd: session.cwd)
+            pb.setString(command, forType: .string)
+
+        case .antigravity:
+            let command = AgentResumeHintBuilder.makeHint(source: .antigravity, sessionID: session.id, cwd: session.cwd)
+            pb.setString(command, forType: .string)
+
         case .gemini:
             let settings = GeminiCLISettings.shared
             guard let sid = geminiCLISessionID ?? GeminiSessionIDHelper.deriveSessionID(from: session) else { return }
@@ -1357,7 +1391,9 @@ struct UnifiedSessionsView: View {
                                openclawIndexer: openclawIndexer,
                                cursorIndexer: cursorIndexer,
                                piIndexer: piIndexer,
-                               grokIndexer: grokIndexer)
+                               grokIndexer: grokIndexer,
+                               ampIndexer: ampIndexer,
+                               antigravityIndexer: antigravityIndexer)
                 .environmentObject(focusCoordinator)
                 .environmentObject(searchState)
                 .id("transcript-host")
@@ -1380,6 +1416,8 @@ struct UnifiedSessionsView: View {
                         case .cursor: return "Cursor"
                         case .pi: return "Pi"
                         case .grok: return "Grok Build"
+                        case .amp: return "Amp"
+                        case .antigravity: return "Antigravity"
                         }
                     }()
                     let accent: Color = sourceAccent(s)
@@ -1531,6 +1569,16 @@ struct UnifiedSessionsView: View {
                 if grokAgentEnabled {
                     AgentTabToggle(title: "Grok", color: Color.agentGrok, isMonochrome: stripMonochrome, isOn: $unified.includeGrok)
                         .help("Show or hide Grok Build sessions in the list")
+                }
+
+                if ampAgentEnabled {
+                    AgentTabToggle(title: "Amp", color: Color.agentAmp, isMonochrome: stripMonochrome, isOn: $unified.includeAmp)
+                        .help("Show or hide Amp sessions in the list")
+                }
+
+                if antigravityAgentEnabled {
+                    AgentTabToggle(title: "Antigravity", color: Color.agentAntigravity, isMonochrome: stripMonochrome, isOn: $unified.includeAntigravity)
+                        .help("Show or hide Antigravity sessions in the list")
                 }
             }
             .controlSize(.small)
@@ -1898,6 +1946,10 @@ struct UnifiedSessionsView: View {
             requestedSelectionReload = true
         } else if s.source == .grok, let exist = grokIndexer.allSessions.first(where: { $0.id == id }), exist.events.isEmpty {
             grokIndexer.reloadSession(id: id)
+        } else if s.source == .amp, let exist = ampIndexer.allSessions.first(where: { $0.id == id }), exist.events.isEmpty {
+            ampIndexer.reloadSession(id: id)
+        } else if s.source == .antigravity, let exist = antigravityIndexer.allSessions.first(where: { $0.id == id }), exist.events.isEmpty {
+            antigravityIndexer.reloadSession(id: id)
             requestedSelectionReload = true
         }
 
@@ -2069,6 +2121,10 @@ struct UnifiedSessionsView: View {
             if !unified.includePi { unified.includePi = true }
         case .grok:
             if !unified.includeGrok { unified.includeGrok = true }
+        case .amp:
+            if !unified.includeAmp { unified.includeAmp = true }
+        case .antigravity:
+            if !unified.includeAntigravity { unified.includeAntigravity = true }
         }
     }
 
@@ -2301,6 +2357,8 @@ struct UnifiedSessionsView: View {
         case .cursor: label = "Cursor"
         case .pi: label = "Pi"
         case .grok: label = "Grok"
+        case .amp: label = "Amp"
+        case .antigravity: label = "Antigravity"
         }
         let isSubagentRow = (hierarchyRowMeta[session.id]?.depth ?? 0) > 0
         return HStack(spacing: 6) {
@@ -2538,6 +2596,9 @@ struct UnifiedSessionsView: View {
             return PiSettings.shared.effectiveWorkingDirectory(for: session)
         case .grok:
             return GrokSettings.shared.effectiveWorkingDirectory(for: session)
+        case .amp, .antigravity:
+            guard let path = session.cwd, !path.isEmpty else { return nil }
+            return URL(fileURLWithPath: path)
         case .gemini:
             return GeminiCLISettings.shared.effectiveWorkingDirectory(for: session)
         default:
@@ -2575,6 +2636,8 @@ struct UnifiedSessionsView: View {
         case .cursor: return "Cursor CLI"
         case .pi: return "Pi CLI"
         case .grok: return "Grok Build"
+        case .amp: return "Amp"
+        case .antigravity: return "Antigravity"
         case .gemini: return "Gemini CLI"
         default: return "CLI"
         }
@@ -2584,7 +2647,7 @@ struct UnifiedSessionsView: View {
         switch s.source {
         case .codex:
             return canResumeCodexInCLI(s)
-        case .claude, .opencode, .hermes, .copilot, .cursor, .pi, .grok:
+        case .claude, .opencode, .hermes, .copilot, .cursor, .pi, .grok, .amp, .antigravity:
             return true
         case .gemini:
             return (geminiCLISessionID ?? GeminiSessionIDHelper.deriveSessionID(from: s)) != nil
@@ -2719,6 +2782,34 @@ struct UnifiedSessionsView: View {
                     NSSound.beep()
                 }
             }
+        case .amp:
+            let command = AgentResumeHintBuilder.makeHint(source: .amp, sessionID: s.id, cwd: s.cwd)
+            Task { @MainActor in
+                do {
+                    switch ResumePreferenceHelpers.resolveTerminalKind() {
+                    case .iterm2:
+                        try AgentTerminalLauncher.launchInITerm(shellCommand: command, domain: "AmpTerminalLauncher")
+                    case .warp, .warpPreview, .terminalApp, .unknown:
+                        try AgentTerminalLauncher.launchInTerminal(shellCommand: command, domain: "AmpTerminalLauncher")
+                    }
+                } catch {
+                    NSSound.beep()
+                }
+            }
+        case .antigravity:
+            let command = AgentResumeHintBuilder.makeHint(source: .antigravity, sessionID: s.id, cwd: s.cwd)
+            Task { @MainActor in
+                do {
+                    switch ResumePreferenceHelpers.resolveTerminalKind() {
+                    case .iterm2:
+                        try AgentTerminalLauncher.launchInITerm(shellCommand: command, domain: "AntigravityTerminalLauncher")
+                    case .warp, .warpPreview, .terminalApp, .unknown:
+                        try AgentTerminalLauncher.launchInTerminal(shellCommand: command, domain: "AntigravityTerminalLauncher")
+                    }
+                } catch {
+                    NSSound.beep()
+                }
+            }
         case .gemini:
             let settings = GeminiCLISettings.shared
             let sid = GeminiSessionIDHelper.deriveSessionID(from: s)
@@ -2822,12 +2913,14 @@ struct UnifiedSessionsView: View {
                                 includeCursor: unified.includeCursor && cursorAgentEnabled,
                                 includePi: unified.includePi && piAgentEnabled,
                                 includeGrok: unified.includeGrok && grokAgentEnabled,
+                                includeAmp: unified.includeAmp && ampAgentEnabled,
+                                includeAntigravity: unified.includeAntigravity && antigravityAgentEnabled,
                                 enableDeepScan: searchCoordinator.deepScanEnabled,
                                 all: unified.allSessions)
     }
 
     private func flashAgentEnablementNoticeIfNeeded() {
-        let anyDisabled = !(codexAgentEnabled && claudeAgentEnabled && geminiAgentEnabled && openCodeAgentEnabled && hermesAgentEnabled && copilotAgentEnabled && droidAgentEnabled && openClawAgentEnabled && cursorAgentEnabled && piAgentEnabled && grokAgentEnabled)
+        let anyDisabled = !(codexAgentEnabled && claudeAgentEnabled && geminiAgentEnabled && openCodeAgentEnabled && hermesAgentEnabled && copilotAgentEnabled && droidAgentEnabled && openClawAgentEnabled && cursorAgentEnabled && piAgentEnabled && grokAgentEnabled && ampAgentEnabled && antigravityAgentEnabled)
         guard anyDisabled else {
             withAnimation { showAgentEnablementNotice = false }
             return
@@ -2852,6 +2945,8 @@ struct UnifiedSessionsView: View {
         case .cursor: return Color.agentCursor
         case .pi: return Color.agentPi
         case .grok: return Color.agentGrok
+        case .amp: return Color.agentAmp
+        case .antigravity: return Color.agentAntigravity
         }
     }
 
@@ -3333,6 +3428,8 @@ private struct TranscriptHostView: View {
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
     let grokIndexer: GrokSessionIndexer
+    let ampIndexer: AmpSessionIndexer
+    let antigravityIndexer: AntigravitySessionIndexer
 
     var body: some View {
         ZStack { // keep one stable container to avoid split reset
@@ -3371,6 +3468,22 @@ private struct TranscriptHostView: View {
                 enableCaching: false
             )
             .opacity(kind == .grok ? 1 : 0)
+            UnifiedTranscriptView(
+                indexer: ampIndexer,
+                sessionID: selection,
+                sessionIDExtractor: { $0.id.isEmpty ? nil : $0.id },
+                sessionIDLabel: "Amp",
+                enableCaching: false
+            )
+            .opacity(kind == .amp ? 1 : 0)
+            UnifiedTranscriptView(
+                indexer: antigravityIndexer,
+                sessionID: selection,
+                sessionIDExtractor: { $0.id.isEmpty ? nil : $0.id },
+                sessionIDLabel: "Antigravity",
+                enableCaching: false
+            )
+            .opacity(kind == .antigravity ? 1 : 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
@@ -3516,6 +3629,8 @@ private struct UnifiedSearchFiltersView: View {
     @ObservedObject var searchState: UnifiedSearchState
     @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
     @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
+    @AppStorage(PreferencesKey.Agents.ampEnabled) private var ampAgentEnabled: Bool = AgentEnablement.isEnabled(.amp)
+    @AppStorage(PreferencesKey.Agents.antigravityEnabled) private var antigravityAgentEnabled: Bool = AgentEnablement.isEnabled(.antigravity)
     @FocusState private var searchFocus: SearchFocusTarget?
     @State private var searchDebouncer: DispatchWorkItem? = nil
     @State private var focusRequestToken: Int = 0
@@ -3652,6 +3767,8 @@ private struct UnifiedSearchFiltersView: View {
                      includeCursor: unified.includeCursor,
                      includePi: unified.includePi && piAgentEnabled,
                      includeGrok: unified.includeGrok && grokAgentEnabled,
+                     includeAmp: unified.includeAmp && ampAgentEnabled,
+                     includeAntigravity: unified.includeAntigravity && antigravityAgentEnabled,
                      enableDeepScan: deepScan,
                      all: unified.allSessions)
     }
@@ -3688,6 +3805,8 @@ private struct UnifiedSearchFiltersView: View {
                          includeCursor: unified.includeCursor,
                          includePi: unified.includePi && piAgentEnabled,
                          includeGrok: unified.includeGrok && grokAgentEnabled,
+                         includeAmp: unified.includeAmp && ampAgentEnabled,
+                         includeAntigravity: unified.includeAntigravity && antigravityAgentEnabled,
                          enableDeepScan: false,
                          all: unified.allSessions)
         }

@@ -208,6 +208,18 @@ class AgentSessionsCLITests(unittest.TestCase):
                 else:
                     os.environ["GROK_HOME"] = old
 
+    def test_amp_sessions_root_default(self) -> None:
+        expected = Path.home() / ".local" / "share" / "amp" / "threads"
+        self.assertEqual(cli._DISK.amp_sessions_root(), expected)
+
+    def test_antigravity_sessions_root_default(self) -> None:
+        expected = Path.home() / ".gemini" / "antigravity-cli"
+        self.assertEqual(cli._DISK.antigravity_sessions_root(), expected)
+
+    def test_amp_and_antigravity_registered_in_disk_fetchers(self) -> None:
+        self.assertIn("amp", cli._DISK.DISK_FETCHERS)
+        self.assertIn("antigravity", cli._DISK.DISK_FETCHERS)
+
 
 if __name__ == "__main__":
     unittest.main()

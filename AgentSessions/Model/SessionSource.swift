@@ -13,6 +13,8 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
     case cursor = "cursor"
     case pi = "pi"
     case grok = "grok"
+    case amp = "amp"
+    case antigravity = "antigravity"
 
     public var displayName: String {
         switch self {
@@ -27,6 +29,8 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .cursor: return "Cursor"
         case .pi: return "Pi"
         case .grok: return "Grok Build"
+        case .amp: return "Amp"
+        case .antigravity: return "Antigravity"
         }
     }
 
@@ -43,6 +47,8 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .cursor: return "cursorarrow.rays"
         case .pi: return "p.circle"
         case .grok: return "x.circle"
+        case .amp: return "bolt.circle"
+        case .antigravity: return "sparkle"
         }
     }
 
@@ -58,6 +64,8 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .cursor:           return "3.2"
         case .pi:               return "3.8"
         case .grok:             return "3.9.2"
+        case .amp:              return "3.9.3"
+        case .antigravity:      return "3.9.3"
         }
     }
 
@@ -74,6 +82,8 @@ public enum SessionSource: String, Codable, CaseIterable, Sendable {
         case .cursor:   return "Import and search your Cursor AI sessions"
         case .pi:       return "Browse your Pi coding agent sessions"
         case .grok:     return "Browse your Grok Build coding agent sessions"
+        case .amp:      return "Browse your Amp CLI thread sessions"
+        case .antigravity: return "Browse your Antigravity CLI conversations"
         }
     }
 }

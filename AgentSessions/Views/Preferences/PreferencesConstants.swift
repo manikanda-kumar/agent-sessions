@@ -51,6 +51,8 @@ enum PreferencesKey {
     static let cursorCLIAvailable = "CursorCLIAvailable"
     static let piCLIAvailable = "PiCLIAvailable"
     static let grokCLIAvailable = "GrokCLIAvailable"
+    static let ampCLIAvailable = "AmpCLIAvailable"
+    static let antigravityCLIAvailable = "AntigravityCLIAvailable"
 
     enum Agents {
         static let didSeedEnabledAgents = "DidSeedEnabledAgents_v1"
@@ -65,6 +67,8 @@ enum PreferencesKey {
         static let cursorEnabled = "AgentEnabledCursor"
         static let piEnabled = "AgentEnabledPi"
         static let grokEnabled = "AgentEnabledGrok"
+        static let ampEnabled = "AgentEnabledAmp"
+        static let antigravityEnabled = "AgentEnabledAntigravity"
         static let knownAvailableProviders = "KnownAvailableProviders"
     }
 
@@ -118,6 +122,8 @@ enum PreferencesKey {
         static let cursorSessionsRootOverride = "CursorSessionsRootOverride"
         static let piSessionsRootOverride = "PiSessionsRootOverride"
         static let grokSessionsRootOverride = "GrokSessionsRootOverride"
+        static let ampSessionsRootOverride = "AmpSessionsRootOverride"
+        static let antigravitySessionsRootOverride = "AntigravitySessionsRootOverride"
     }
 
     enum Archives {

@@ -183,6 +183,8 @@ struct AgentSessionsApp: App {
     @StateObject private var cursorIndexer = CursorSessionIndexer()
     @StateObject private var piIndexer = PiSessionIndexer()
     @StateObject private var grokIndexer = GrokSessionIndexer()
+    @StateObject private var ampIndexer = AmpSessionIndexer()
+    @StateObject private var antigravityIndexer = AntigravitySessionIndexer()
     @StateObject private var updaterController = UpdaterController()
     @StateObject private var onboardingCoordinator = OnboardingCoordinator()
     @StateObject private var unifiedIndexerHolder = _UnifiedHolder()
@@ -215,6 +217,8 @@ struct AgentSessionsApp: App {
     @AppStorage(PreferencesKey.Agents.hermesEnabled) private var hermesAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
     @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
+    @AppStorage(PreferencesKey.Agents.ampEnabled) private var ampAgentEnabled: Bool = AgentEnablement.isEnabled(.amp)
+    @AppStorage(PreferencesKey.Agents.antigravityEnabled) private var antigravityAgentEnabled: Bool = AgentEnablement.isEnabled(.antigravity)
     @AppStorage(PreferencesKey.Advanced.hideDockIcon) private var hideDockIcon: Bool = false
     @AppStorage("UnifiedLegacyNoticeShown") private var unifiedNoticeShown: Bool = false
     @State private var selectedSessionID: String?
@@ -265,7 +269,9 @@ struct AgentSessionsApp: App {
                 openclawIndexer: openclawIndexer,
                 cursorIndexer: cursorIndexer,
                 piIndexer: piIndexer,
-                grokIndexer: grokIndexer
+                grokIndexer: grokIndexer,
+                ampIndexer: ampIndexer,
+                antigravityIndexer: antigravityIndexer
             )
             configuredUnifiedWindow(unified: unified)
         }
@@ -287,6 +293,8 @@ struct AgentSessionsApp: App {
             cursorIndexer: cursorIndexer,
             piIndexer: piIndexer,
             grokIndexer: grokIndexer,
+            ampIndexer: ampIndexer,
+            antigravityIndexer: antigravityIndexer,
             analyticsReady: analyticsReady,
             analyticsPhase: analyticsPhase,
             analyticsIsStale: analyticsStale,
@@ -332,48 +340,38 @@ struct AgentSessionsApp: App {
             applyActivationPolicyAndCleanupIfNeeded(hideDockIcon: newValue, menuBarEnabled: menuBarEnabled)
             updateUsageModels()
         }
-        .onChange(of: codexAgentEnabled) { _, _ in handleAgentEnablementChange() }
-        .onChange(of: claudeAgentEnabled) { _, _ in handleAgentEnablementChange() }
-        .onChange(of: geminiAgentEnabled) { _, _ in handleAgentEnablementChange() }
-        .onChange(of: openCodeAgentEnabled) { _, _ in handleAgentEnablementChange() }
-        .onChange(of: piAgentEnabled) { _, _ in handleAgentEnablementChange() }
-        .onChange(of: grokAgentEnabled) { _, _ in handleAgentEnablementChange() }
-        .onAppear {
-            guard !AppRuntime.isRunningTests else { return }
-            applyActivationPolicyAndCleanupIfNeeded(hideDockIcon: hideDockIcon, menuBarEnabled: menuBarEnabled)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showOnboardingFromMenu)) { _ in
-            onboardingCoordinator.presentManually()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showPowerTipsFromMenu)) { _ in
-            onboardingCoordinator.presentPowerTips()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .requestCoreIndexRebuild)) { _ in
-            unified.rebuildCoreIndex()
-        }
-        .onChange(of: onboardingCoordinator.isPresented) { _, isPresented in
-            if isPresented, let content = onboardingCoordinator.content {
-                onboardingWindowPresenter.show(
-                    content: content,
-                    coordinator: onboardingCoordinator,
-                    codexIndexer: indexer,
-                    claudeIndexer: claudeIndexer,
-                    geminiIndexer: geminiIndexer,
-                    opencodeIndexer: opencodeIndexer,
-                    hermesIndexer: hermesIndexer,
-                    copilotIndexer: copilotIndexer,
-                    droidIndexer: droidIndexer,
-                    openclawIndexer: openclawIndexer,
-                    cursorIndexer: cursorIndexer,
-                    piIndexer: piIndexer,
-                    grokIndexer: grokIndexer,
-                    codexUsageModel: codexUsageModel,
-                    claudeUsageModel: claudeUsageModel
-                )
-            } else {
-                onboardingWindowPresenter.hide()
-            }
-        }
+        .modifier(UnifiedWindowLifecycleModifier(
+            unified: unified,
+            onboardingCoordinator: onboardingCoordinator,
+            onboardingWindowPresenter: onboardingWindowPresenter,
+            indexer: indexer,
+            claudeIndexer: claudeIndexer,
+            geminiIndexer: geminiIndexer,
+            opencodeIndexer: opencodeIndexer,
+            hermesIndexer: hermesIndexer,
+            copilotIndexer: copilotIndexer,
+            droidIndexer: droidIndexer,
+            openclawIndexer: openclawIndexer,
+            cursorIndexer: cursorIndexer,
+            piIndexer: piIndexer,
+            grokIndexer: grokIndexer,
+            ampIndexer: ampIndexer,
+            antigravityIndexer: antigravityIndexer,
+            codexUsageModel: codexUsageModel,
+            claudeUsageModel: claudeUsageModel,
+            hideDockIcon: hideDockIcon,
+            menuBarEnabled: menuBarEnabled,
+            codexAgentEnabled: codexAgentEnabled,
+            claudeAgentEnabled: claudeAgentEnabled,
+            geminiAgentEnabled: geminiAgentEnabled,
+            openCodeAgentEnabled: openCodeAgentEnabled,
+            piAgentEnabled: piAgentEnabled,
+            grokAgentEnabled: grokAgentEnabled,
+            ampAgentEnabled: ampAgentEnabled,
+            antigravityAgentEnabled: antigravityAgentEnabled,
+            onAgentEnablementChange: handleAgentEnablementChange,
+            onApplyActivationPolicy: { applyActivationPolicyAndCleanupIfNeeded(hideDockIcon: $0, menuBarEnabled: $1) }
+        ))
     }
 
     var body: some Scene {
@@ -459,7 +457,9 @@ struct AgentSessionsApp: App {
                         openclawIndexer: openclawIndexer,
                         cursorIndexer: cursorIndexer,
                         piIndexer: piIndexer,
-                        grokIndexer: grokIndexer
+                        grokIndexer: grokIndexer,
+                        ampIndexer: ampIndexer,
+                        antigravityIndexer: antigravityIndexer
                     )
                 )
                 .environmentObject(archiveManager)
@@ -521,7 +521,9 @@ final class _UnifiedHolder: ObservableObject {
                      openclawIndexer: OpenClawSessionIndexer,
                      cursorIndexer: CursorSessionIndexer,
                      piIndexer: PiSessionIndexer,
-                     grokIndexer: GrokSessionIndexer) -> UnifiedSessionIndexer {
+                     grokIndexer: GrokSessionIndexer,
+                     ampIndexer: AmpSessionIndexer,
+                     antigravityIndexer: AntigravitySessionIndexer) -> UnifiedSessionIndexer {
         if let u = unified { return u }
         let u = UnifiedSessionIndexer(codexIndexer: codexIndexer,
                                       claudeIndexer: claudeIndexer,
@@ -533,7 +535,9 @@ final class _UnifiedHolder: ObservableObject {
                                       openclawIndexer: openclawIndexer,
                                       cursorIndexer: cursorIndexer,
                                       piIndexer: piIndexer,
-                                      grokIndexer: grokIndexer)
+                                      grokIndexer: grokIndexer,
+                                      ampIndexer: ampIndexer,
+                                      antigravityIndexer: antigravityIndexer)
         unified = u
         return u
     }
@@ -641,7 +645,9 @@ extension AgentSessionsApp {
             openclawIndexer: openclawIndexer,
             cursorIndexer: cursorIndexer,
             piIndexer: piIndexer,
-            grokIndexer: grokIndexer
+            grokIndexer: grokIndexer,
+            ampIndexer: ampIndexer,
+            antigravityIndexer: antigravityIndexer
         )
     }
 
@@ -1150,6 +1156,8 @@ final class OnboardingWindowPresenter: NSObject, NSWindowDelegate {
         cursorIndexer: CursorSessionIndexer,
         piIndexer: PiSessionIndexer,
         grokIndexer: GrokSessionIndexer,
+        ampIndexer: AmpSessionIndexer,
+        antigravityIndexer: AntigravitySessionIndexer,
         codexUsageModel: CodexUsageModel,
         claudeUsageModel: ClaudeUsageModel
     ) {
@@ -1168,6 +1176,8 @@ final class OnboardingWindowPresenter: NSObject, NSWindowDelegate {
             cursorIndexer: cursorIndexer,
             piIndexer: piIndexer,
             grokIndexer: grokIndexer,
+            ampIndexer: ampIndexer,
+            antigravityIndexer: antigravityIndexer,
             codexUsageModel: codexUsageModel,
             claudeUsageModel: claudeUsageModel
         )
@@ -1247,6 +1257,89 @@ final class OnboardingWindowPresenter: NSObject, NSWindowDelegate {
 }
 // (Legacy ContentView and FirstRunPrompt removed)
 
+private struct UnifiedWindowLifecycleModifier: ViewModifier {
+    let unified: UnifiedSessionIndexer
+    let onboardingCoordinator: OnboardingCoordinator
+    let onboardingWindowPresenter: OnboardingWindowPresenter
+    let indexer: SessionIndexer
+    let claudeIndexer: ClaudeSessionIndexer
+    let geminiIndexer: GeminiSessionIndexer
+    let opencodeIndexer: OpenCodeSessionIndexer
+    let hermesIndexer: HermesSessionIndexer
+    let copilotIndexer: CopilotSessionIndexer
+    let droidIndexer: DroidSessionIndexer
+    let openclawIndexer: OpenClawSessionIndexer
+    let cursorIndexer: CursorSessionIndexer
+    let piIndexer: PiSessionIndexer
+    let grokIndexer: GrokSessionIndexer
+    let ampIndexer: AmpSessionIndexer
+    let antigravityIndexer: AntigravitySessionIndexer
+    let codexUsageModel: CodexUsageModel
+    let claudeUsageModel: ClaudeUsageModel
+    let hideDockIcon: Bool
+    let menuBarEnabled: Bool
+    let codexAgentEnabled: Bool
+    let claudeAgentEnabled: Bool
+    let geminiAgentEnabled: Bool
+    let openCodeAgentEnabled: Bool
+    let piAgentEnabled: Bool
+    let grokAgentEnabled: Bool
+    let ampAgentEnabled: Bool
+    let antigravityAgentEnabled: Bool
+    let onAgentEnablementChange: () -> Void
+    let onApplyActivationPolicy: (Bool, Bool) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: codexAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: claudeAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: geminiAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: openCodeAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: piAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: grokAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: ampAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onChange(of: antigravityAgentEnabled) { _, _ in onAgentEnablementChange() }
+            .onAppear {
+                guard !AppRuntime.isRunningTests else { return }
+                onApplyActivationPolicy(hideDockIcon, menuBarEnabled)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .showOnboardingFromMenu)) { _ in
+                onboardingCoordinator.presentManually()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .showPowerTipsFromMenu)) { _ in
+                onboardingCoordinator.presentPowerTips()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .requestCoreIndexRebuild)) { _ in
+                unified.rebuildCoreIndex()
+            }
+            .onChange(of: onboardingCoordinator.isPresented) { _, isPresented in
+                if isPresented, let content = onboardingCoordinator.content {
+                    onboardingWindowPresenter.show(
+                        content: content,
+                        coordinator: onboardingCoordinator,
+                        codexIndexer: indexer,
+                        claudeIndexer: claudeIndexer,
+                        geminiIndexer: geminiIndexer,
+                        opencodeIndexer: opencodeIndexer,
+                        hermesIndexer: hermesIndexer,
+                        copilotIndexer: copilotIndexer,
+                        droidIndexer: droidIndexer,
+                        openclawIndexer: openclawIndexer,
+                        cursorIndexer: cursorIndexer,
+                        piIndexer: piIndexer,
+                        grokIndexer: grokIndexer,
+                        ampIndexer: ampIndexer,
+                        antigravityIndexer: antigravityIndexer,
+                        codexUsageModel: codexUsageModel,
+                        claudeUsageModel: claudeUsageModel
+                    )
+                } else {
+                    onboardingWindowPresenter.hide()
+                }
+            }
+    }
+}
+
 private struct OnboardingWindowState {
     let content: OnboardingContent
     let coordinator: OnboardingCoordinator
@@ -1261,6 +1354,8 @@ private struct OnboardingWindowState {
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
     let grokIndexer: GrokSessionIndexer
+    let ampIndexer: AmpSessionIndexer
+    let antigravityIndexer: AntigravitySessionIndexer
     let codexUsageModel: CodexUsageModel
     let claudeUsageModel: ClaudeUsageModel
 }
@@ -1284,6 +1379,8 @@ private struct OnboardingWindowRoot: View {
             cursorIndexer: state.cursorIndexer,
             piIndexer: state.piIndexer,
             grokIndexer: state.grokIndexer,
+            ampIndexer: state.ampIndexer,
+            antigravityIndexer: state.antigravityIndexer,
             codexUsageModel: state.codexUsageModel,
             claudeUsageModel: state.claudeUsageModel
         )

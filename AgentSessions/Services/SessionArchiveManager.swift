@@ -463,6 +463,22 @@ final class SessionArchiveManager: ObservableObject, @unchecked Sendable {
                     map[s.id] = url
                 }
             }
+        case .amp:
+            let custom = defaults.string(forKey: PreferencesKey.Paths.ampSessionsRootOverride)
+            let discovery = AmpSessionDiscovery(customRoot: custom?.isEmpty == false ? custom : nil)
+            for url in discovery.discoverSessionFiles() {
+                if let s = AmpSessionParser.parseFile(at: url), !s.id.isEmpty {
+                    map[s.id] = url
+                }
+            }
+        case .antigravity:
+            let custom = defaults.string(forKey: PreferencesKey.Paths.antigravitySessionsRootOverride)
+            let discovery = AntigravitySessionDiscovery(customRoot: custom?.isEmpty == false ? custom : nil)
+            for url in discovery.discoverSessionFiles() {
+                for session in AntigravitySessionParser.parseHistoryFile(at: url) where !session.id.isEmpty {
+                    map[session.id] = url
+                }
+            }
         }
 
         return map
@@ -494,6 +510,11 @@ final class SessionArchiveManager: ObservableObject, @unchecked Sendable {
             return PiSessionParser.parseFile(at: upstreamURL) ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
         case .grok:
             return GrokSessionParser.parseFile(at: upstreamURL) ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
+        case .amp:
+            return AmpSessionParser.parseFile(at: upstreamURL) ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
+        case .antigravity:
+            return AntigravitySessionParser.parseSession(id: sessionID, historyURL: upstreamURL)
+                ?? minimalSession(source: source, id: sessionID, url: upstreamURL)
         }
     }
 

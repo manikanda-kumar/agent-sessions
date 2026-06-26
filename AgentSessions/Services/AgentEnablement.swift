@@ -62,6 +62,10 @@ enum AgentEnablement {
             return isAvailable(.pi, defaults: defaults)
         case .grok:
             return isAvailable(.grok, defaults: defaults)
+        case .amp:
+            return isAvailable(.amp, defaults: defaults)
+        case .antigravity:
+            return isAvailable(.antigravity, defaults: defaults)
         default:
             return true
         }
@@ -80,6 +84,8 @@ enum AgentEnablement {
         case .cursor:   return PreferencesKey.Agents.cursorEnabled
         case .pi:       return PreferencesKey.Agents.piEnabled
         case .grok:     return PreferencesKey.Agents.grokEnabled
+        case .amp:      return PreferencesKey.Agents.ampEnabled
+        case .antigravity: return PreferencesKey.Agents.antigravityEnabled
         }
     }
 
@@ -185,6 +191,8 @@ enum AgentEnablement {
             setEnabledInternal(.cursor, enabled: isAvailable(.cursor, defaults: defaults), defaults: defaults)
             setEnabledInternal(.pi, enabled: isAvailable(.pi, defaults: defaults), defaults: defaults)
             setEnabledInternal(.grok, enabled: isAvailable(.grok, defaults: defaults), defaults: defaults)
+            setEnabledInternal(.amp, enabled: isAvailable(.amp, defaults: defaults), defaults: defaults)
+            setEnabledInternal(.antigravity, enabled: isAvailable(.antigravity, defaults: defaults), defaults: defaults)
         } else {
             // Cold start: avoid spawning the user's login shell (can be slow with heavy rc files).
             // Prefer filesystem availability checks and fall back to a fast PATH/common-locations probe.
@@ -199,6 +207,8 @@ enum AgentEnablement {
             let cursor = isAvailable(.cursor, defaults: defaults)
             let pi = isAvailable(.pi, defaults: defaults)
             let grok = isAvailable(.grok, defaults: defaults)
+            let amp = isAvailable(.amp, defaults: defaults)
+            let antigravity = isAvailable(.antigravity, defaults: defaults)
 
             setEnabledInternal(.codex, enabled: codex, defaults: defaults)
             setEnabledInternal(.claude, enabled: claude, defaults: defaults)
@@ -211,6 +221,8 @@ enum AgentEnablement {
             setEnabledInternal(.cursor, enabled: cursor, defaults: defaults)
             setEnabledInternal(.pi, enabled: pi, defaults: defaults)
             setEnabledInternal(.grok, enabled: grok, defaults: defaults)
+            setEnabledInternal(.amp, enabled: amp, defaults: defaults)
+            setEnabledInternal(.antigravity, enabled: antigravity, defaults: defaults)
         }
 
         // Guarantee at least one enabled agent.
@@ -274,6 +286,15 @@ enum AgentEnablement {
         case .grok:
             let custom = defaults.string(forKey: PreferencesKey.Paths.grokSessionsRootOverride) ?? ""
             root = GrokSessionDiscovery(customRoot: custom.isEmpty ? nil : custom).sessionsRoot()
+        case .amp:
+            let custom = defaults.string(forKey: PreferencesKey.Paths.ampSessionsRootOverride) ?? ""
+            root = AmpSessionDiscovery(customRoot: custom.isEmpty ? nil : custom).sessionsRoot()
+        case .antigravity:
+            let custom = defaults.string(forKey: PreferencesKey.Paths.antigravitySessionsRootOverride) ?? ""
+            let disc = AntigravitySessionDiscovery(customRoot: custom.isEmpty ? nil : custom)
+            root = disc.sessionsRoot()
+            if fm.fileExists(atPath: disc.historyFileURL().path) { return true }
+            if disc.hasConversationDBFiles() { return true }
         }
         if fm.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue { return true }
         if source == .droid {
@@ -313,6 +334,10 @@ enum AgentEnablement {
             return binaryDetectedCached("pi")
         case .grok:
             return binaryDetectedCached("grok")
+        case .amp:
+            return binaryDetectedCached("amp")
+        case .antigravity:
+            return binaryDetectedCached("agy")
         }
     }
 
@@ -367,6 +392,10 @@ enum AgentEnablement {
             return defaults.object(forKey: PreferencesKey.piCLIAvailable) as? Bool
         case .grok:
             return defaults.object(forKey: PreferencesKey.grokCLIAvailable) as? Bool
+        case .amp:
+            return defaults.object(forKey: PreferencesKey.ampCLIAvailable) as? Bool
+        case .antigravity:
+            return defaults.object(forKey: PreferencesKey.antigravityCLIAvailable) as? Bool
         }
     }
 

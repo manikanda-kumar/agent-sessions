@@ -28,6 +28,8 @@ extension Color {
     static let agentPi: Color = TranscriptColorSystem.agentBrandAccent(source: .pi)
     /// Grok brand color
     static let agentGrok: Color = TranscriptColorSystem.agentBrandAccent(source: .grok)
+    static let agentAmp: Color = TranscriptColorSystem.agentBrandAccent(source: .amp)
+    static let agentAntigravity: Color = TranscriptColorSystem.agentBrandAccent(source: .antigravity)
 
     // MARK: - Monochrome Support
 
@@ -43,6 +45,8 @@ extension Color {
     static let agentCursorGray = Color(white: 0.9)
     static let agentPiGray = Color(white: 0.68)
     static let agentGrokGray = Color(white: 0.66)
+    static let agentAmpGray = Color(white: 0.64)
+    static let agentAntigravityGray = Color(white: 0.62)
 
     /// Get the brand color for a given session source
     static func agentColor(for source: SessionSource) -> Color {
@@ -58,6 +62,8 @@ extension Color {
         case .cursor: return .agentCursor
         case .pi: return .agentPi
         case .grok: return .agentGrok
+        case .amp: return .agentAmp
+        case .antigravity: return .agentAntigravity
         }
     }
 
@@ -76,6 +82,8 @@ extension Color {
             case .cursor: return .agentCursorGray
             case .pi: return .agentPiGray
             case .grok: return .agentGrokGray
+            case .amp: return .agentAmpGray
+            case .antigravity: return .agentAntigravityGray
             }
         } else {
             return agentColor(for: source)
@@ -107,6 +115,10 @@ extension Color {
             return .agentPi
         } else if lower == "grok" || lower.contains("grok build") {
             return .agentGrok
+        } else if lower == "amp" {
+            return .agentAmp
+        } else if lower == "antigravity" {
+            return .agentAntigravity
         } else {
             return .accentColor
         }
@@ -138,6 +150,10 @@ extension Color {
                 return .agentPiGray
             } else if lower == "grok" || lower.contains("grok build") {
                 return .agentGrokGray
+            } else if lower == "amp" {
+                return .agentAmpGray
+            } else if lower == "antigravity" {
+                return .agentAntigravityGray
             } else {
                 return .secondary
             }

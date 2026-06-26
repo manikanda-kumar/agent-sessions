@@ -201,6 +201,8 @@ struct SessionTerminalView: View {
         case .cursor: return "Cursor"
         case .pi: return "Pi"
         case .grok: return "Grok Build"
+        case .amp: return "Amp"
+        case .antigravity: return "Antigravity"
         }
     }
 

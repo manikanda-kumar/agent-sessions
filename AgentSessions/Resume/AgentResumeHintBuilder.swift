@@ -14,6 +14,10 @@ enum AgentResumeHintBuilder {
         switch source {
         case .grok:
             return .directoryNamed
+        case .amp:
+            return .threadJSON
+        case .antigravity:
+            return .historyIndex
         case .opencode, .hermes:
             return .sqliteSession
         case .codex, .claude, .gemini, .copilot, .droid, .openclaw, .cursor, .pi:
@@ -68,6 +72,12 @@ enum AgentResumeHintBuilder {
         case .openclaw:
             let command = binary ?? "openclaw"
             return "\(prefix)\(ShellQuoting.quoteIfNeeded(command)) resume \(id)"
+        case .amp:
+            let command = binary ?? "amp"
+            return "\(prefix)\(ShellQuoting.quoteIfNeeded(command)) threads continue \(id)"
+        case .antigravity:
+            let command = binary ?? "agy"
+            return "\(prefix)\(ShellQuoting.quoteIfNeeded(command)) --conversation \(id)"
         }
     }
 

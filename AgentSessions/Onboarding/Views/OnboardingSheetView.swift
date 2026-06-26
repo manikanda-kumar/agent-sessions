@@ -15,6 +15,8 @@ struct OnboardingSheetView: View {
     let cursorIndexer: CursorSessionIndexer
     let piIndexer: PiSessionIndexer
     let grokIndexer: GrokSessionIndexer
+    let ampIndexer: AmpSessionIndexer
+    let antigravityIndexer: AntigravitySessionIndexer
     @ObservedObject var codexUsageModel: CodexUsageModel
     @ObservedObject var claudeUsageModel: ClaudeUsageModel
 
@@ -32,6 +34,8 @@ struct OnboardingSheetView: View {
     @AppStorage(PreferencesKey.Agents.cursorEnabled) private var cursorAgentEnabled: Bool = true
     @AppStorage(PreferencesKey.Agents.piEnabled) private var piAgentEnabled: Bool = AgentEnablement.isEnabled(.pi)
     @AppStorage(PreferencesKey.Agents.grokEnabled) private var grokAgentEnabled: Bool = AgentEnablement.isEnabled(.grok)
+    @AppStorage(PreferencesKey.Agents.ampEnabled) private var ampAgentEnabled: Bool = AgentEnablement.isEnabled(.amp)
+    @AppStorage(PreferencesKey.Agents.antigravityEnabled) private var antigravityAgentEnabled: Bool = AgentEnablement.isEnabled(.antigravity)
 
     @AppStorage(PreferencesKey.codexUsageEnabled) private var codexUsageEnabled: Bool = false
     @AppStorage(PreferencesKey.claudeUsageEnabled) private var claudeUsageEnabled: Bool = false
@@ -141,6 +145,8 @@ struct OnboardingSheetView: View {
         .onReceive(cursorIndexer.$allSessions) { _ in handleSessionDataUpdate() }
         .onReceive(piIndexer.$allSessions) { _ in handleSessionDataUpdate() }
         .onReceive(grokIndexer.$allSessions) { _ in handleSessionDataUpdate() }
+        .onReceive(ampIndexer.$allSessions) { _ in handleSessionDataUpdate() }
+        .onReceive(antigravityIndexer.$allSessions) { _ in handleSessionDataUpdate() }
         .onChange(of: hideZeroMessageSessionsPref) { _, _ in handleSessionDataUpdate() }
         .onChange(of: hideLowMessageSessionsPref) { _, _ in handleSessionDataUpdate() }
         .onChange(of: showHousekeepingSessionsPref) { _, _ in handleSessionDataUpdate() }
@@ -685,6 +691,16 @@ struct OnboardingSheetView: View {
                 get: { grokAgentEnabled },
                 set: { _ = AgentEnablement.setEnabled(.grok, enabled: $0) }
             )
+        case .amp:
+            return Binding(
+                get: { ampAgentEnabled },
+                set: { _ = AgentEnablement.setEnabled(.amp, enabled: $0) }
+            )
+        case .antigravity:
+            return Binding(
+                get: { antigravityAgentEnabled },
+                set: { _ = AgentEnablement.setEnabled(.antigravity, enabled: $0) }
+            )
         }
     }
 
@@ -763,6 +779,8 @@ struct OnboardingSheetView: View {
         case .cursor: return cursorIndexer.allSessions
         case .pi: return piIndexer.allSessions
         case .grok: return grokIndexer.allSessions
+        case .amp: return ampIndexer.allSessions
+        case .antigravity: return antigravityIndexer.allSessions
         }
     }
 
@@ -779,6 +797,8 @@ struct OnboardingSheetView: View {
         case .cursor: return cursorAgentEnabled
         case .pi: return piAgentEnabled
         case .grok: return grokAgentEnabled
+        case .amp: return ampAgentEnabled
+        case .antigravity: return antigravityAgentEnabled
         }
     }
 
@@ -830,6 +850,8 @@ struct OnboardingSheetView: View {
             + cursorIndexer.allSessions
             + piIndexer.allSessions
             + grokIndexer.allSessions
+            + ampIndexer.allSessions
+            + antigravityIndexer.allSessions
         return WeeklyActivityDay.build(from: sessions, palette: palette)
     }
 
@@ -861,7 +883,7 @@ struct OnboardingSheetView: View {
         // Tool-call-only filter (strict)
         if hasCommandsOnlyPref {
             switch session.source {
-            case .codex, .opencode, .hermes, .copilot, .droid, .openclaw, .cursor, .pi, .grok:
+            case .codex, .opencode, .hermes, .copilot, .droid, .openclaw, .cursor, .pi, .grok, .amp, .antigravity:
                 if !session.events.isEmpty {
                     if !session.events.contains(where: { $0.kind == .tool_call }) { return false }
                 } else {
@@ -1125,6 +1147,8 @@ private struct AgentBadge: View {
         case .cursor: return "CR"
         case .pi: return "PI"
         case .grok: return "GK"
+        case .amp: return "AM"
+        case .antigravity: return "AG"
         }
     }
 }
@@ -2190,6 +2214,10 @@ private struct OnboardingPalette {
             return Color.agentPi
         case .grok:
             return Color.agentGrok
+        case .amp:
+            return Color.agentAmp
+        case .antigravity:
+            return Color.agentAntigravity
         }
     }
 }

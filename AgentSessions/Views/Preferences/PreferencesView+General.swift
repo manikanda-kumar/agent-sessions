@@ -70,7 +70,7 @@ extension PreferencesView {
 
             sectionHeader("Active CLI agents")
             VStack(alignment: .leading, spacing: 6) {
-                let enabledCount = [codexAgentEnabled, claudeAgentEnabled, geminiAgentEnabled, openCodeAgentEnabled, hermesAgentEnabled, copilotAgentEnabled, droidAgentEnabled, openClawAgentEnabled, cursorAgentEnabled, piAgentEnabled, grokAgentEnabled].filter { $0 }.count
+                let enabledCount = [codexAgentEnabled, claudeAgentEnabled, geminiAgentEnabled, openCodeAgentEnabled, hermesAgentEnabled, copilotAgentEnabled, droidAgentEnabled, openClawAgentEnabled, cursorAgentEnabled, piAgentEnabled, grokAgentEnabled, ampAgentEnabled, antigravityAgentEnabled].filter { $0 }.count
 
                 agentEnableToggle(title: "Codex", source: .codex, isOn: $codexAgentEnabled, enabledCount: enabledCount)
                 agentEnableToggle(title: "Claude", source: .claude, isOn: $claudeAgentEnabled, enabledCount: enabledCount)
@@ -83,6 +83,8 @@ extension PreferencesView {
                 agentEnableToggle(title: "Cursor", source: .cursor, isOn: $cursorAgentEnabled, enabledCount: enabledCount)
                 agentEnableToggle(title: "Pi", source: .pi, isOn: $piAgentEnabled, enabledCount: enabledCount)
                 agentEnableToggle(title: "Grok Build", source: .grok, isOn: $grokAgentEnabled, enabledCount: enabledCount)
+                agentEnableToggle(title: "Amp", source: .amp, isOn: $ampAgentEnabled, enabledCount: enabledCount)
+                agentEnableToggle(title: "Antigravity", source: .antigravity, isOn: $antigravityAgentEnabled, enabledCount: enabledCount)
 
                 Text("Disabled agents are hidden across the app and background work is paused.")
                     .font(.caption)

@@ -175,6 +175,8 @@ final class SearchCoordinator: ObservableObject, @unchecked Sendable {
                includeCursor: Bool,
                includePi: Bool,
                includeGrok: Bool,
+               includeAmp: Bool,
+               includeAntigravity: Bool,
                enableDeepScan: Bool,
                all: [Session]) {
         // Cancel any in-flight search
@@ -198,6 +200,8 @@ final class SearchCoordinator: ObservableObject, @unchecked Sendable {
             if includeCursor { set.insert(.cursor) }
             if includePi { set.insert(.pi) }
             if includeGrok { set.insert(.grok) }
+            if includeAmp { set.insert(.amp) }
+            if includeAntigravity { set.insert(.antigravity) }
             return set
         }()
         

@@ -414,6 +414,103 @@ def fetch_grok_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[R
     return rows[: int(limit)] if limit else rows
 
 
+def amp_sessions_root() -> Path:
+    return Path.home() / ".local" / "share" / "amp" / "threads"
+
+
+def antigravity_sessions_root() -> Path:
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def _amp_read_thread(path: Path) -> Optional[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def fetch_amp_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[RowDict]:
+    sessions_root = amp_sessions_root()
+    if not sessions_root.is_dir():
+        return []
+    rows: list[RowDict] = []
+    for path in sessions_root.glob("T-*.json"):
+        payload = _amp_read_thread(path)
+        if not payload:
+            continue
+        sid = payload.get("id") or path.stem
+        cwd = payload.get("cwd")
+        if isinstance(cwd, dict):
+            cwd = cwd.get("path") or cwd.get("root")
+        if not path_matches_project(cwd if isinstance(cwd, str) else None, root, repo_label):
+            continue
+        created = payload.get("created")
+        sort_ts = _mtime_ts(path)
+        if isinstance(created, (int, float)):
+            sort_ts = int(float(created) / 1000.0) if float(created) > 1e12 else int(created)
+        title = (
+            payload.get("title")
+            or payload.get("summary")
+            or payload.get("name")
+            or f"Amp thread {str(sid)[:12]}"
+        )
+        messages = payload.get("messages")
+        msg_count = len(messages) if isinstance(messages, list) else 0
+        rows.append(
+            _make_row(
+                source="amp",
+                session_id=str(sid),
+                title=str(title).strip() or "(no title)",
+                sort_ts=sort_ts,
+                cwd=cwd if isinstance(cwd, str) else None,
+                repo_label=repo_label,
+                messages=msg_count,
+            )
+        )
+    rows.sort(key=lambda r: r["sort_ts"], reverse=True)
+    return rows[: int(limit)] if limit else rows
+
+
+def fetch_antigravity_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[RowDict]:
+    history_path = antigravity_sessions_root() / "history.jsonl"
+    if not history_path.is_file():
+        return []
+    latest_by_id: dict[str, RowDict] = {}
+    fallback_mtime = _mtime_ts(history_path)
+    for line in _iter_jsonl(history_path):
+        obj = _parse_json_line(line)
+        if not obj:
+            continue
+        sid = obj.get("conversationId") or obj.get("conversation_id") or obj.get("id")
+        if not sid:
+            continue
+        cwd = obj.get("cwd") or obj.get("workingDirectory")
+        if not path_matches_project(cwd if isinstance(cwd, str) else None, root, repo_label):
+            continue
+        sort_ts = _extract_timestamp(obj) or fallback_mtime
+        title = (
+            obj.get("title")
+            or obj.get("summary")
+            or obj.get("name")
+            or f"Antigravity session {str(sid)[:12]}"
+        )
+        row = _make_row(
+            source="antigravity",
+            session_id=str(sid),
+            title=str(title).strip() or "(no title)",
+            sort_ts=sort_ts,
+            cwd=cwd if isinstance(cwd, str) else None,
+            repo_label=repo_label,
+        )
+        existing = latest_by_id.get(str(sid))
+        if existing is None or row["sort_ts"] >= existing["sort_ts"]:
+            latest_by_id[str(sid)] = row
+    rows = list(latest_by_id.values())
+    rows.sort(key=lambda r: r["sort_ts"], reverse=True)
+    return rows[: int(limit)] if limit else rows
+
+
 def fetch_pi_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[RowDict]:
     sessions_root = Path.home() / ".pi" / "agent" / "sessions"
     if not sessions_root.is_dir():
@@ -646,6 +743,14 @@ def fetch_droid_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[
                 obj = _parse_json_line(line)
                 if not obj:
                     continue
+                obj_type = str(obj.get("type") or "").replace("_", "").replace("-", "").lower()
+                if obj_type == "sessionstart":
+                    session_id = str(obj.get("id") or session_id)
+                    for key in ("title", "sessionTitle", "session_title"):
+                        candidate = obj.get(key)
+                        if isinstance(candidate, str) and candidate.strip():
+                            title = candidate.strip()[:200]
+                            break
                 if not cwd:
                     for k in ("cwd", "workdir", "working_directory", "workspace"):
                         v = obj.get(k)
@@ -656,6 +761,19 @@ def fetch_droid_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[
                     t = obj.get("content") or obj.get("text")
                     if isinstance(t, str) and t.strip():
                         title = t.strip()[:200]
+                if not title and obj_type == "message":
+                    msg = obj.get("message")
+                    if isinstance(msg, dict) and msg.get("role") == "user":
+                        content = msg.get("content")
+                        if isinstance(content, list):
+                            for part in content:
+                                if not isinstance(part, dict):
+                                    continue
+                                if part.get("type") == "text":
+                                    t = part.get("text")
+                                    if isinstance(t, str) and t.strip() and "<system-reminder>" not in t[:80].lower():
+                                        title = t.strip()[:200]
+                                        break
             parent_cwd = str(path.parent)
             if not cwd and path_matches_project(parent_cwd, root, repo_label):
                 cwd = parent_cwd
@@ -773,4 +891,6 @@ DISK_FETCHERS: dict[str, Callable[[Path, str, Optional[int]], list[RowDict]]] = 
     "cursor": fetch_cursor_disk,
     "pi": fetch_pi_disk,
     "grok": fetch_grok_disk,
+    "amp": fetch_amp_disk,
+    "antigravity": fetch_antigravity_disk,
 }

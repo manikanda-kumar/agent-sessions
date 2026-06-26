@@ -51,6 +51,8 @@ ALL_SOURCES: tuple[str, ...] = (
     "cursor",
     "pi",
     "grok",
+    "amp",
+    "antigravity",
 )
 
 AGENTS: dict[str, str] = {
@@ -70,6 +72,9 @@ AGENTS: dict[str, str] = {
     "pi": "pi",
     "grok": "grok",
     "grok-build": "grok",
+    "amp": "amp",
+    "agy": "antigravity",
+    "antigravity": "antigravity",
 }
 
 DISPLAY_NAMES: dict[str, str] = {
@@ -84,6 +89,8 @@ DISPLAY_NAMES: dict[str, str] = {
     "cursor": "Cursor",
     "pi": "Pi",
     "grok": "Grok Build",
+    "amp": "Amp",
+    "antigravity": "Antigravity",
 }
 
 DISK_STORE_HINTS: dict[str, str] = {
@@ -98,6 +105,8 @@ DISK_STORE_HINTS: dict[str, str] = {
     "cursor": "~/.cursor/projects",
     "pi": "~/.pi/agent/sessions",
     "grok": "~/.grok/sessions",
+    "amp": "~/.local/share/amp/threads",
+    "antigravity": "~/.gemini/antigravity-cli/conversations",
 }
 
 
@@ -218,6 +227,10 @@ def build_resume_hint(
         return f"{prefix}pi --resume {shell_quote(session_id)}"
     if source == "grok":
         return f"{prefix}grok -r {shell_quote(session_id)}"
+    if source == "amp":
+        return f"{prefix}amp threads continue {shell_quote(session_id)}"
+    if source == "antigravity":
+        return f"{prefix}agy --conversation {shell_quote(session_id)}"
     if source == "droid":
         return f"{prefix}droid resume {shell_quote(session_id)}"
     if source == "openclaw":
@@ -303,6 +316,8 @@ def agent_data_present() -> dict[str, bool]:
         "cursor": home / ".cursor" / "projects",
         "pi": home / ".pi" / "agent" / "sessions",
         "grok": _DISK.grok_sessions_root(),
+        "amp": _DISK.amp_sessions_root(),
+        "antigravity": _DISK.antigravity_sessions_root(),
     }
     return {k: v.exists() for k, v in checks.items()}
 
