@@ -92,6 +92,24 @@ final class DroidSessionParser {
         return nil
     }
 
+    /// True when a Droid user message should be used as the session list title.
+    private static func isSubstantiveDroidUserPrompt(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("# task tool invocation") { return false }
+        if Session.isAgentsPreambleText(trimmed) { return false }
+        return true
+    }
+
+    private static func resolvedSessionStoreTitle(sessionStartTitle: String?, userPromptTitle: String?) -> String? {
+        if let userPromptTitle,
+           isSubstantiveDroidUserPrompt(userPromptTitle) {
+            return userPromptTitle
+        }
+        return sessionStartTitle
+    }
+
     private static func messageText(_ obj: [String: Any]) -> String? {
         return stringValue(obj, keys: ["text", "content", "message"])
     }
@@ -197,7 +215,8 @@ final class DroidSessionParser {
     private static func parseSessionStorePreview(url: URL, forcedID: String?, size: Int, mtime: Date) -> Session? {
         let reader = JSONLReader(url: url)
         var sessionID: String? = forcedID
-        var title: String? = nil
+        var sessionStartTitle: String? = nil
+        var userPromptTitle: String? = nil
         var cwd: String? = nil
         var tmin: Date? = nil
         var tmax: Date? = nil
@@ -217,7 +236,7 @@ final class DroidSessionParser {
 
                 if normalizedType(type) == "sessionstart" {
                     if sessionID == nil { sessionID = obj["id"] as? String }
-                    if title == nil { title = sessionStoreTitle(from: obj) }
+                    if sessionStartTitle == nil { sessionStartTitle = sessionStoreTitle(from: obj) }
                     if cwd == nil { cwd = obj["cwd"] as? String }
                     return true
                 }
@@ -233,13 +252,16 @@ final class DroidSessionParser {
                       let parts = msg["content"] as? [[String: Any]] else { return true }
                 let role = normalizedRole(msg["role"])
 
-                // Title fallback: first user text block that isn't empty.
-                if title == nil, role == "user" {
-                    if let first = parts.first(where: { canonicalPartType($0["type"]) == "text" }),
-                       let text = first["text"] as? String {
-                        let extracted = extractUserPromptFromSystemReminder(text)
-                        let trimmed = extracted.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty { title = trimmed }
+                // Title fallback: first substantive user prompt.
+                if userPromptTitle == nil, role == "user" {
+                    let joined = parts.compactMap { part -> String? in
+                        guard canonicalPartType(part["type"]) == "text" else { return nil }
+                        return part["text"] as? String
+                    }.joined(separator: "\n")
+                    let extracted = extractUserPromptFromSystemReminder(joined)
+                    let trimmed = extracted.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isSubstantiveDroidUserPrompt(trimmed) {
+                        userPromptTitle = trimmed
                     }
                 }
 
@@ -265,6 +287,7 @@ final class DroidSessionParser {
         }
 
         let id = sessionID ?? forcedID ?? sha256(path: url.path)
+        let resolvedTitle = resolvedSessionStoreTitle(sessionStartTitle: sessionStartTitle, userPromptTitle: userPromptTitle)
         return Session(
             id: id,
             source: .droid,
@@ -277,9 +300,9 @@ final class DroidSessionParser {
             events: [],
             cwd: cwd,
             repoName: nil,
-            lightweightTitle: title,
+            lightweightTitle: resolvedTitle,
             lightweightCommands: estimatedCommands,
-            customTitle: title
+            customTitle: resolvedTitle
         )
     }
 
@@ -288,7 +311,8 @@ final class DroidSessionParser {
 
         var events: [SessionEvent] = []
         var sessionID: String? = forcedID
-        var title: String? = nil
+        var sessionStartTitle: String? = nil
+        var userPromptTitle: String? = nil
         var cwd: String? = nil
         var tmin: Date? = nil
         var tmax: Date? = nil
@@ -307,7 +331,7 @@ final class DroidSessionParser {
 
                 if normalizedType(type) == "sessionstart" {
                     if sessionID == nil { sessionID = obj["id"] as? String }
-                    if title == nil { title = sessionStoreTitle(from: obj) }
+                    if sessionStartTitle == nil { sessionStartTitle = sessionStoreTitle(from: obj) }
                     if cwd == nil { cwd = obj["cwd"] as? String }
                     return
                 }
@@ -338,9 +362,12 @@ final class DroidSessionParser {
 
                     if kind == .user {
                         let extracted = extractUserPromptFromSystemReminder(joined)
+                        let promptText = extracted.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if userPromptTitle == nil, isSubstantiveDroidUserPrompt(promptText) {
+                            userPromptTitle = promptText
+                        }
                         let originalTrimmed = joined.trimmingCharacters(in: .whitespacesAndNewlines)
                         let reminderTrimmed = extracted.reminder?.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let promptText = extracted.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
 
                         let canSplit = (reminderTrimmed?.isEmpty == false) && !promptText.isEmpty && promptText != originalTrimmed
                         if canSplit, let reminderText = reminderTrimmed {
@@ -485,6 +512,7 @@ final class DroidSessionParser {
 
         let sid = sessionID ?? forcedID ?? sha256(path: url.path)
         let nonMetaCount = events.filter { $0.kind != .meta }.count
+        let resolvedTitle = resolvedSessionStoreTitle(sessionStartTitle: sessionStartTitle, userPromptTitle: userPromptTitle)
         return Session(
             id: sid,
             source: .droid,
@@ -497,9 +525,9 @@ final class DroidSessionParser {
             events: events,
             cwd: cwd,
             repoName: nil,
-            lightweightTitle: title,
+            lightweightTitle: resolvedTitle,
             lightweightCommands: events.filter { $0.kind == .tool_call }.count,
-            customTitle: title
+            customTitle: nil
         )
     }
 

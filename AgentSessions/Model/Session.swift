@@ -328,6 +328,11 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
             if !collapsed.isEmpty { return collapsed }
         }
 
+        // 2.5) Parser-provided title (session_start or first substantive prompt).
+        if let lightTitle = lightweightTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !lightTitle.isEmpty {
+            return lightTitle.collapsedWhitespace()
+        }
+
         // 3) Fallback: first non-empty assistant line (also skip preamble when enabled)
         for e in events where e.kind == .assistant {
             guard let raw = e.text?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { continue }
@@ -387,6 +392,8 @@ public struct Session: Identifiable, Equatable, Codable, Sendable {
         if lower.contains("<environment_context>") || lower.contains("</environment_context>") { return true }
         // Droid / Factory: some logs embed <system-reminder>...</system-reminder> blocks before the first real prompt.
         if lower.contains("<system-reminder") || lower.contains("</system-reminder>") { return true }
+        // Droid subagent/task harness messages are scaffolding, not user prompts.
+        if lower.hasPrefix("# task tool invocation") { return true }
         // Codex CLI harness: turn-aborted notices can appear as XML-ish blocks captured under the user role.
         if lower.contains("<turn_aborted") || lower.contains("</turn_aborted>") { return true }
         // Strong anchors commonly seen in agents.md-driven openings

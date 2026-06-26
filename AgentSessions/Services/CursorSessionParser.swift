@@ -427,33 +427,69 @@ final class CursorSessionParser {
         let fm = FileManager.default
         var isDir: ObjCBool = false
 
-        // Greedy walk: track the resolved prefix (committed path with slashes)
-        // and the current component being built (may accumulate literal hyphens).
-        //
-        // Example: segments = ["Users", "alexm", "Repository", "Codex", "History"]
-        //   Step 1: "/Users" is a dir → resolvedPrefix="/Users", component="alexm"
-        //   Step 2: "/Users/alexm" is a dir → resolvedPrefix="/Users/alexm", component="Repository"
-        //   Step 3: "/Users/alexm/Repository" is a dir → resolvedPrefix="/Users/alexm/Repository", component="Codex"
-        //   Step 4: "/Users/alexm/Repository/Codex" is NOT a dir → component="Codex-History"
-        //   Final: "/Users/alexm/Repository/Codex-History"
-        var resolvedPrefix = ""
+        if segments.count == 1 {
+            return "/" + segments[0]
+        }
+
+        // macOS home paths always encode as Users-<username>-...
+        // Seed /Users/<username> even when that directory is absent on this machine,
+        // peel any confirmed directories, then greedy-decode the remainder.
+        if segments[0] == "Users", segments.count >= 2 {
+            let homePrefix = "/Users/\(segments[1])"
+            var remainder = Array(segments.dropFirst(2))
+            if remainder.isEmpty { return homePrefix }
+
+            var prefix = homePrefix
+            while !remainder.isEmpty {
+                let candidate = prefix + "/" + remainder[0]
+                if fm.fileExists(atPath: candidate, isDirectory: &isDir), isDir.boolValue {
+                    prefix = candidate
+                    remainder = Array(remainder.dropFirst())
+                } else {
+                    break
+                }
+            }
+
+            // When the encoded home is absent locally, peel one more segment before merging
+            // hyphens so intermediate dirs (e.g. Repository) are not collapsed into the tail.
+            if remainder.count >= 3,
+               !fm.fileExists(atPath: homePrefix, isDirectory: &isDir) {
+                prefix = prefix + "/" + remainder[0]
+                remainder = Array(remainder.dropFirst())
+            }
+
+            return greedyDecodeHyphenatedComponents(resolvedPrefix: prefix, segments: remainder)
+        }
+
+        return greedyDecodeHyphenatedComponents(resolvedPrefix: "", segments: segments)
+    }
+
+    /// Greedy decode for Cursor's `-`-encoded paths after an optional seeded prefix.
+    /// Uses the filesystem to commit directory boundaries; otherwise treats hyphens as literal.
+    private static func greedyDecodeHyphenatedComponents(resolvedPrefix: String, segments: [String]) -> String? {
+        guard !segments.isEmpty else { return resolvedPrefix.isEmpty ? nil : resolvedPrefix }
+
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        var prefix = resolvedPrefix
         var currentComponent = segments[0]
         var i = 1
 
         while i < segments.count {
-            let candidateDir = resolvedPrefix + "/" + currentComponent
+            let candidateDir = prefix.isEmpty ? "/" + currentComponent : prefix + "/" + currentComponent
             if fm.fileExists(atPath: candidateDir, isDirectory: &isDir), isDir.boolValue {
-                // currentComponent is a real directory — commit it as a path level
-                resolvedPrefix = candidateDir
+                prefix = candidateDir
                 currentComponent = segments[i]
             } else {
-                // Not a directory — this hyphen is literal within the component name
                 currentComponent = currentComponent + "-" + segments[i]
             }
             i += 1
         }
 
-        return resolvedPrefix + "/" + currentComponent
+        if prefix.isEmpty {
+            return "/" + currentComponent
+        }
+        return prefix + "/" + currentComponent
     }
 
     /// Extract the project directory name from a transcript file URL.
