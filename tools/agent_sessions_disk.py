@@ -331,6 +331,26 @@ def _pi_read_header(path: Path) -> Optional[dict]:
     return None
 
 
+def _pi_project_dir_name(working_directory: str) -> Optional[str]:
+    trimmed = working_directory.strip()
+    if not trimmed:
+        return None
+    without_leading = trimmed[1:] if trimmed.startswith("/") else trimmed
+    sanitized = without_leading.replace("/", "-").replace(":", "-")
+    if not sanitized:
+        return None
+    return f"--{sanitized}--"
+
+
+def _decode_pi_project_dir(name: str) -> Optional[str]:
+    if not name.startswith("--") or not name.endswith("--") or len(name) <= 4:
+        return None
+    body = name[2:-2]
+    if not body:
+        return None
+    return "/" + body.replace("-", "/")
+
+
 def grok_sessions_root() -> Path:
     """Resolve Grok sessions root, honoring GROK_HOME like GrokSessionDiscovery."""
     raw = os.environ.get("GROK_HOME", "").strip()
@@ -515,36 +535,49 @@ def fetch_pi_disk(root: Path, repo_label: str, limit: Optional[int]) -> list[Row
     sessions_root = Path.home() / ".pi" / "agent" / "sessions"
     if not sessions_root.is_dir():
         return []
+    scoped_name = _pi_project_dir_name(str(root))
+    if scoped_name:
+        project_dirs = [sessions_root / scoped_name]
+    else:
+        project_dirs = [
+            entry
+            for entry in sessions_root.iterdir()
+            if entry.is_dir() and entry.name.startswith("--") and entry.name.endswith("--")
+        ]
     rows: list[RowDict] = []
-    for path in sessions_root.rglob("*.jsonl"):
-        header = _pi_read_header(path)
-        if not header:
+    for project_dir in project_dirs:
+        if not project_dir.is_dir():
             continue
-        cwd = header.get("cwd")
-        if not path_matches_project(cwd, root, repo_label):
-            continue
-        sid = header.get("id") or path.stem
-        ts_raw = header.get("timestamp")
-        sort_ts = 0
-        if isinstance(ts_raw, str):
-            try:
-                sort_ts = int(datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp())
-            except ValueError:
+        cwd_from_dir = _decode_pi_project_dir(project_dir.name)
+        for path in project_dir.glob("*.jsonl"):
+            header = _pi_read_header(path)
+            if not header:
+                continue
+            cwd = header.get("cwd") or cwd_from_dir
+            if not path_matches_project(cwd if isinstance(cwd, str) else None, root, repo_label):
+                continue
+            sid = header.get("id") or path.stem
+            ts_raw = header.get("timestamp")
+            sort_ts = 0
+            if isinstance(ts_raw, str):
+                try:
+                    sort_ts = int(datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp())
+                except ValueError:
+                    sort_ts = _mtime_ts(path)
+            else:
                 sort_ts = _mtime_ts(path)
-        else:
-            sort_ts = _mtime_ts(path)
-        title = (header.get("summary") or header.get("name") or path.parent.name or "").strip() or "(no title)"
-        rows.append(
-            _make_row(
-                source="pi",
-                session_id=sid,
-                title=title,
-                sort_ts=sort_ts,
-                cwd=cwd,
-                repo_label=repo_label,
-                model=header.get("modelId"),
+            title = (header.get("summary") or header.get("name") or path.parent.name or "").strip() or "(no title)"
+            rows.append(
+                _make_row(
+                    source="pi",
+                    session_id=sid,
+                    title=title,
+                    sort_ts=sort_ts,
+                    cwd=cwd if isinstance(cwd, str) else None,
+                    repo_label=repo_label,
+                    model=header.get("modelId"),
+                )
             )
-        )
     rows.sort(key=lambda r: r["sort_ts"], reverse=True)
     return rows[: int(limit)] if limit else rows
 

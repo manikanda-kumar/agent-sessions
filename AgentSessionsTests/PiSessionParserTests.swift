@@ -84,11 +84,12 @@ final class PiSessionParserTests: XCTestCase {
         let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("pi-discovery-\(UUID().uuidString)", isDirectory: true)
         let sessionsDir = temp.appendingPathComponent("agent/sessions", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
+        let projectDir = sessionsDir.appendingPathComponent("--tmp-as-agent-fixture-project--", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temp) }
 
-        let valid = sessionsDir.appendingPathComponent("valid.jsonl")
-        let invalid = sessionsDir.appendingPathComponent("invalid.jsonl")
+        let valid = projectDir.appendingPathComponent("valid.jsonl")
+        let invalid = projectDir.appendingPathComponent("invalid.jsonl")
         try #"{"type":"session","version":3,"id":"pi-test","timestamp":"2026-05-12T01:02:27.657Z"}"#
             .write(to: valid, atomically: true, encoding: .utf8)
         try #"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"not a header"}]}}"#
@@ -96,6 +97,29 @@ final class PiSessionParserTests: XCTestCase {
 
         let discovery = PiSessionDiscovery(customRoot: temp.path)
         XCTAssertEqual(discovery.discoverSessionFiles().map(\.lastPathComponent), ["valid.jsonl"])
+    }
+
+    func testParseFileInfersCWDFromProjectDirectoryWhenHeaderOmitsCwd() throws {
+        let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("pi-infer-cwd-\(UUID().uuidString)", isDirectory: true)
+        // Pi directory names are lossy when path segments contain hyphens; use a round-tripping path here.
+        let workspace = URL(fileURLWithPath: "/tmp/pifixture/project", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: temp)
+            try? FileManager.default.removeItem(at: workspace.deletingLastPathComponent())
+        }
+
+        let projectDirectory = try XCTUnwrap(PiSessionLocator.projectDirectoryName(for: workspace.path))
+        let sessionDir = temp.appendingPathComponent(projectDirectory, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        let url = sessionDir.appendingPathComponent("missing-cwd.jsonl")
+        try #"{"type":"session","version":3,"id":"missing-cwd","timestamp":"2026-05-12T01:02:27.657Z"}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+
+        let session = try XCTUnwrap(PiSessionParser.parseFile(at: url))
+        XCTAssertEqual(session.lightweightCwd, workspace.path)
+        XCTAssertEqual(session.repoName, "project")
     }
 
     func testParseFileFullUsesCurrentTreePathOnly() throws {

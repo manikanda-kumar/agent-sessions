@@ -13,44 +13,47 @@ final class PiSessionDiscovery: SessionDiscovery {
             let expanded = (customRoot as NSString).expandingTildeInPath
             return normalizedSessionsRoot(URL(fileURLWithPath: expanded, isDirectory: true))
         }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".pi", isDirectory: true)
-            .appendingPathComponent("agent", isDirectory: true)
-            .appendingPathComponent("sessions", isDirectory: true)
+        return URL(fileURLWithPath: PiSessionLocator.defaultSessionsRoot(), isDirectory: true)
     }
 
     func discoverSessionFiles() -> [URL] {
+        discoverSessionFiles(cwdFilter: nil)
+    }
+
+    func discoverSessionFiles(cwdFilter: String?) -> [URL] {
         let root = sessionsRoot()
+        let scanRoot = PiSessionLocator.scopedSessionsRoot(root: root, cwdFilter: cwdFilter)
         let fm = FileManager.default
         var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
+        guard fm.fileExists(atPath: scanRoot.path, isDirectory: &isDir), isDir.boolValue else {
             return []
         }
 
-        guard let enumerator = fm.enumerator(at: root,
-                                             includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-                                             options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
-            return []
-        }
-
+        let scopedToProject = scanRoot.path != root.path
         var files: [URL] = []
-        for case let url as URL in enumerator {
-            guard url.pathExtension.lowercased() == "jsonl" else { continue }
-            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
-                  values.isRegularFile == true else {
-                continue
+
+        if scopedToProject {
+            collectSessionFiles(in: scanRoot, fileManager: fm, into: &files)
+        } else {
+            guard let projectEntries = try? fm.contentsOfDirectory(
+                at: scanRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                return []
             }
-            guard isPiSessionFile(url) else { continue }
-            files.append(url)
+            for projectURL in projectEntries {
+                guard isProjectDirectory(projectURL) else { continue }
+                collectSessionFiles(in: projectURL, fileManager: fm, into: &files)
+            }
         }
 
-        return files
-            .sorted {
-                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                if a != b { return a > b }
-                return $0.lastPathComponent > $1.lastPathComponent
-            }
+        return files.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if a != b { return a > b }
+            return $0.lastPathComponent > $1.lastPathComponent
+        }
     }
 
     private func normalizedSessionsRoot(_ root: URL) -> URL {
@@ -68,6 +71,34 @@ final class PiSessionDiscovery: SessionDiscovery {
             }
         }
         return root
+    }
+
+    private func collectSessionFiles(in parent: URL, fileManager: FileManager, into files: inout [URL]) {
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        for url in entries {
+            guard url.pathExtension.lowercased() == "jsonl" else { continue }
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else {
+                continue
+            }
+            guard isPiSessionFile(url) else { continue }
+            files.append(url)
+        }
+    }
+
+    private func isProjectDirectory(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+              values.isDirectory == true else {
+            return false
+        }
+        let name = url.lastPathComponent
+        return name.hasPrefix("--") && name.hasSuffix("--") && name.count > 4
     }
 
     private func isPiSessionFile(_ url: URL) -> Bool {

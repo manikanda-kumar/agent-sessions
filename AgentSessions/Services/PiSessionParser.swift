@@ -123,6 +123,7 @@ final class PiSessionParser {
         let model = deriveModel(entries: activeEntries)
         let start = parseDate(header.timestamp)
         let end = activeEntries.reversed().compactMap { parseDate($0.timestamp) }.first ?? start
+        let resolvedCWD = resolvedCWD(header: header, url: url)
 
         return Session(
             id: id,
@@ -134,8 +135,8 @@ final class PiSessionParser {
             fileSizeBytes: fileSize(at: url),
             eventCount: nonMetaCount,
             events: [],
-            cwd: normalizedStoredPath(header.cwd),
-            repoName: repoName(from: header.cwd),
+            cwd: resolvedCWD,
+            repoName: repoName(from: resolvedCWD),
             lightweightTitle: title,
             lightweightCommands: estimatedToolCount(entries: activeEntries),
             parentSessionID: parentSessionID(from: header.parentSession),
@@ -161,6 +162,7 @@ final class PiSessionParser {
         let title = deriveTitle(entries: activeEntries)
         let start = parseDate(header.timestamp)
         let end = activeEntries.reversed().compactMap { parseDate($0.timestamp) }.first ?? start
+        let resolvedCWD = resolvedCWD(header: header, url: url)
 
         return Session(
             id: id,
@@ -172,8 +174,8 @@ final class PiSessionParser {
             fileSizeBytes: fileSize(at: url),
             eventCount: nonMetaCount,
             events: events,
-            cwd: normalizedStoredPath(header.cwd),
-            repoName: repoName(from: header.cwd),
+            cwd: resolvedCWD,
+            repoName: repoName(from: resolvedCWD),
             lightweightTitle: title,
             lightweightCommands: estimatedToolCount(entries: activeEntries),
             parentSessionID: parentSessionID(from: header.parentSession),
@@ -658,6 +660,10 @@ final class PiSessionParser {
     private static func parseMillis(_ value: Double?) -> Date? {
         guard let value else { return nil }
         return Date(timeIntervalSince1970: value / 1000.0)
+    }
+
+    private static func resolvedCWD(header: Entry, url: URL) -> String? {
+        normalizedStoredPath(header.cwd) ?? PiSessionLocator.inferredCWD(from: url)
     }
 
     private static func normalizedStoredPath(_ rawPath: String?) -> String? {

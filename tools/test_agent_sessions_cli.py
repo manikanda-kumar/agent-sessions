@@ -220,6 +220,12 @@ class AgentSessionsCLITests(unittest.TestCase):
         self.assertIn("amp", cli._DISK.DISK_FETCHERS)
         self.assertIn("antigravity", cli._DISK.DISK_FETCHERS)
 
+    def test_pi_project_directory_round_trip(self) -> None:
+        encode = cli._DISK._pi_project_dir_name
+        decode = cli._DISK._decode_pi_project_dir
+        self.assertEqual(encode("/tmp/as-agent-fixture/project"), "--tmp-as-agent-fixture-project--")
+        self.assertEqual(decode("--tmp-pifixture-project--"), "/tmp/pifixture/project")
+
 
 if __name__ == "__main__":
     unittest.main()
